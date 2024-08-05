@@ -63,12 +63,15 @@ Run the main script:
 
 ### Coordinate Tracker
 
-Run the coordinate tracker utility:
-`python coordinate_tracker.py`
+1. Click the "Start" button in the GUI to begin tracking.
+2. Use the F9 key to record click positions:
+   - First F9 press sets the top-left corner of an area.
+   - Second F9 press sets the bottom-right corner and completes the area.
+   - If a new F9 press is more top-left than the current first point, it updates the first point instead.
+   - After setting the second point, it automatically resets for a new area.
+3. All tracked areas are displayed in the GUI.
+4. Click "Stop" to end tracking.
 
-- Click "Start Tracking" to begin tracking mouse movements.
-- Left-click to set the top-left corner of an area, then left-click again to set the bottom-right corner.
-- Use the displayed coordinates to update the areas in `auto_clicker.py`.
 
 ## Customization
 
