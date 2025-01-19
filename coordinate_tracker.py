@@ -93,7 +93,7 @@ class CoordinateTracker:
     def update_area_list(self):
         self.areas_listbox.delete(0, tk.END)
         for i, area in enumerate(self.areas):
-            self.areas_listbox.insert(tk.END, f"Area {i+1}: ({area['x1']}, {area['y1']}) to ({area['x2']}, {area['y2']})")
+            self.areas_listbox.insert(tk.END, f"Area {i+1}: ({area['x1']}, {area['y1']}, {area['x2']}, {area['y2']})")
 
     def on_closing(self):
         keyboard.unhook_all()
