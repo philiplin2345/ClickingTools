@@ -24,11 +24,11 @@ BASELINE_CLICKING_AREAS = {
     "prayer_tag": (2056, 874, 2083, 909),
     "magic_tag": (2105, 876, 2136, 905),
     "spec": (1931, 251, 1952, 272),
-    "prot_mage": "images/protect_from_mage.png",
-    "prot_range": "images/protect_from_range.png",
-    "prot_melee": "images/protect_from_melee.png",
-    "prot_item": "images/protect_item.png",
-    "rigour": "images/rigour.png",
+    "prot_mage": (1888, 1101, 1927, 1143),
+    "prot_range": (1948, 1101, 1985, 1138),
+    "prot_melee": (2008, 1101, 2054, 1147),
+    "prot_item": (1830, 1101, 1875, 1145),
+    "rigour": (1943, 1213, 1992, 1264),
     "sgs": "images/sgs.png",
     "rock1": (1363, 721, 1469, 817),
     "rock2": (1039, 463, 1159, 546),
@@ -36,10 +36,20 @@ BASELINE_CLICKING_AREAS = {
     "quick_prayers": (1886, 169, 1897, 182)
 }
 
+# Master prayer icon templates used during F10 / startup calibration to lock in exact prayer coordinates
+PRAYER_TEMPLATES = {
+    "prot_mage": "images/protect_from_mage.png",
+    "prot_range": "images/protect_from_range.png",
+    "prot_melee": "images/protect_from_melee.png",
+    "prot_item": "images/protect_item.png",
+    "rigour": "images/rigour.png",
+}
+
 BASELINE_SEARCHING_AREAS = {
     "prayers": (1875, 1090, 2068, 1165),
     "rigour": (1925, 1195, 2018, 1280),
     "prot_item": (1835, 920, 2115, 1300),
+    "prayer_panel": (1835, 920, 2115, 1300),
     "inventory": (1835, 920, 2100, 1050),
     "alarm_patch": (1600, 920, 1640, 960)
 }
@@ -121,7 +131,7 @@ def throttle(func):
 
 
 def save_areas_config():
-    """Save current clicking_areas, searching_areas, and ui_scale to a JSON file."""
+    """Save current clicking_areas, searching_areas, baseline_prayer_boxes, and ui_scale to a JSON file."""
     data = {
         "ui_scale": ui_scale,
         "clicking_areas": {
@@ -131,6 +141,11 @@ def save_areas_config():
         "searching_areas": {
             k: list(v) if isinstance(v, tuple) else v
             for k, v in searching_areas.items()
+        },
+        "baseline_prayer_boxes": {
+            k: list(BASELINE_CLICKING_AREAS[k])
+            for k in PRAYER_TEMPLATES
+            if isinstance(BASELINE_CLICKING_AREAS.get(k), tuple)
         }
     }
     try:
@@ -151,9 +166,15 @@ def load_areas_config():
             data = json.load(f)
         ui_scale = float(data.get("ui_scale", 1.0))
         for k, v in data.get("clicking_areas", {}).items():
+            # Ensure prayer keys are always coordinate tuples even if loading an older config
+            if k in PRAYER_TEMPLATES and not isinstance(v, (list, tuple)):
+                continue
             clicking_areas[k] = tuple(v) if isinstance(v, list) else v
         for k, v in data.get("searching_areas", {}).items():
             searching_areas[k] = tuple(v) if isinstance(v, list) else v
+        for k, v in data.get("baseline_prayer_boxes", {}).items():
+            if k in PRAYER_TEMPLATES and isinstance(v, list) and len(v) == 4:
+                BASELINE_CLICKING_AREAS[k] = tuple(v)
         print(f"[Config] Loaded calibrated areas from '{CONFIG_FILE}' (scale={ui_scale:.3f}).")
         return True
     except Exception as exc:
@@ -221,11 +242,12 @@ def _derive_box(base_box, origin_x, origin_y, scale, screen_w, screen_h):
 
 
 @timing_decorator
-def refresh_areas():
+def refresh_areas(open_prayer_tab=False):
     """
     Scan the full screen for reference icons (prayers or saved tab anchors),
     derive all clicking_areas and searching_areas using relative offsets,
-    and persist them to CONFIG_FILE.
+    lock in constant (x1, y1, x2, y2) coordinates for all prayer icons,
+    crop updated anchor/prayer templates, and persist them to CONFIG_FILE.
     """
     global clicking_areas, searching_areas, ui_scale
 
@@ -237,22 +259,27 @@ def refresh_areas():
 
     matched_anchors = {}
     for name, path, offset in ANCHOR_TEMPLATES:
-        if not os.path.exists(path):
-            continue
-        tmpl = cv2.imread(path, 0)
-        if tmpl is None:
-            continue
-        match = match_template_multiscale(screen_gray, tmpl, threshold=0.78)
-        if match is not None:
-            val, loc, scale_est, size = match
-            matched_anchors[name] = {
-                "val": val,
-                "loc": loc,
-                "scale": scale_est,
-                "size": size,
-                "offset": offset,
-            }
-            print(f"  -> Matched '{name}' at {loc} (confidence={val:.3f}, scale={scale_est:.2f})")
+        # Prefer calibrated crop in images/anchors/ if available, falling back to master template
+        anchor_override = os.path.join(ANCHORS_DIR, f"{name}.png")
+        candidate_paths = [anchor_override, path] if anchor_override != path else [path]
+        for cpath in candidate_paths:
+            if not os.path.exists(cpath):
+                continue
+            tmpl = cv2.imread(cpath, 0)
+            if tmpl is None:
+                continue
+            match = match_template_multiscale(screen_gray, tmpl, threshold=0.78)
+            if match is not None:
+                val, loc, scale_est, size = match
+                matched_anchors[name] = {
+                    "val": val,
+                    "loc": loc,
+                    "scale": scale_est,
+                    "size": size,
+                    "offset": offset,
+                }
+                print(f"  -> Matched '{name}' at {loc} (confidence={val:.3f}, scale={scale_est:.2f})")
+                break
 
     if not matched_anchors:
         print(
@@ -261,20 +288,17 @@ def refresh_areas():
         )
         return False
 
-    # Determine UI scale from template match scale (1.0 when templates match natively)
-    ui_scale = float(np.median([m["scale"] for m in matched_anchors.values()]))
+    # If at least 2 protection prayers matched, compute origin exclusively from them (highest accuracy)
+    prayer_keys = [k for k in ("prot_mage", "prot_range", "prot_melee") if k in matched_anchors]
+    ref_anchors = (
+        [matched_anchors[k] for k in prayer_keys]
+        if len(prayer_keys) >= 2
+        else list(matched_anchors.values())
+    )
 
-    # Compute the current screen position of BASELINE_ORIGIN from the matched anchors
-    origin_estimates_x = []
-    origin_estimates_y = []
-    for m in matched_anchors.values():
-        ox_est = m["loc"][0] - m["offset"][0] * ui_scale
-        oy_est = m["loc"][1] - m["offset"][1] * ui_scale
-        origin_estimates_x.append(ox_est)
-        origin_estimates_y.append(oy_est)
-
-    origin_x = float(np.median(origin_estimates_x))
-    origin_y = float(np.median(origin_estimates_y))
+    ui_scale = float(np.median([m["scale"] for m in ref_anchors]))
+    origin_x = float(np.median([m["loc"][0] - m["offset"][0] * ui_scale for m in ref_anchors]))
+    origin_y = float(np.median([m["loc"][1] - m["offset"][1] * ui_scale for m in ref_anchors]))
 
     # Update all coordinate tuple entries in clicking_areas and searching_areas
     for key, base_val in BASELINE_CLICKING_AREAS.items():
@@ -287,40 +311,92 @@ def refresh_areas():
         if isinstance(base_val, tuple):
             searching_areas[key] = _derive_box(base_val, origin_x, origin_y, ui_scale, screen_w, screen_h)
 
-    # If protection prayers were directly matched, tighten searching_areas["prayers"] around them with padding
-    prayer_keys = [k for k in ("prot_mage", "prot_range", "prot_melee") if k in matched_anchors]
-    if len(prayer_keys) >= 2:
-        pad = max(12, int(15 * ui_scale))
-        px1 = min(matched_anchors[k]["loc"][0] for k in prayer_keys) - pad
-        py1 = min(matched_anchors[k]["loc"][1] for k in prayer_keys) - pad
-        px2 = max(matched_anchors[k]["loc"][0] + matched_anchors[k]["size"][0] for k in prayer_keys) + pad
-        py2 = max(matched_anchors[k]["loc"][1] + matched_anchors[k]["size"][1] for k in prayer_keys) + pad
-        searching_areas["prayers"] = (
-            max(0, px1),
-            max(0, py1),
-            min(screen_w - 1, px2),
-            min(screen_h - 1, py2),
-        )
+    os.makedirs(ANCHORS_DIR, exist_ok=True)
+    opened_prayer_temporarily = False
 
-    # Also locate rigour and prot_item directly if visible on screen so their searching_areas are exact
-    for extra_prayer, default_path in (("rigour", "images/rigour.png"), ("prot_item", "images/protect_item.png")):
-        prayer_path = clicking_areas.get(extra_prayer, default_path)
-        if isinstance(prayer_path, str) and os.path.exists(prayer_path):
-            prayer_tmpl = cv2.imread(prayer_path, 0)
-            if prayer_tmpl is not None:
-                prayer_match = match_template_multiscale(
-                    screen_gray, prayer_tmpl, scales=[ui_scale, 1.0], threshold=0.78
+    # If Prayer tab is not currently open during F10 calibration, open it briefly to scan exact prayer positions
+    if len(prayer_keys) < 2 and open_prayer_tab:
+        # While Prayer tab is closed, crop a clean unselected prayer_tag anchor
+        px1, py1, px2, py2 = clicking_areas["prayer_tag"]
+        p_crop = screen_bgr[py1:py2, px1:px2]
+        if p_crop.size > 0:
+            cv2.imwrite(os.path.join(ANCHORS_DIR, "prayer_tag.png"), p_crop)
+
+        print("  -> Opening Prayer tab briefly to calibrate exact prayer icon positions...")
+        fast_click_spot(clicking_areas["prayer_tag"])
+        time.sleep(0.10)
+        screenshot_pil = pyautogui.screenshot()
+        screen_bgr = cv2.cvtColor(np.array(screenshot_pil), cv2.COLOR_RGB2BGR)
+        screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
+        opened_prayer_temporarily = True
+
+    # Scan the Prayer panel for all 5 prayers in PRAYER_TEMPLATES to lock in their exact coordinates
+    px1, py1, px2, py2 = searching_areas.get("prayer_panel", (1835, 920, 2115, 1300))
+    panel_gray = screen_gray[py1:py2, px1:px2]
+    panel_bgr = screen_bgr[py1:py2, px1:px2]
+
+    matched_prayers_count = 0
+    if panel_gray.size > 0:
+        for prayer_key, master_path in PRAYER_TEMPLATES.items():
+            if not os.path.exists(master_path):
+                continue
+            tmpl = cv2.imread(master_path, 0)
+            if tmpl is None:
+                continue
+            pmatch = match_template_multiscale(
+                panel_gray, tmpl, scales=[ui_scale, 1.0], threshold=0.76
+            )
+            if pmatch is not None:
+                pval, ploc, _, (pw, ph) = pmatch
+                abs_x1 = px1 + ploc[0]
+                abs_y1 = py1 + ploc[1]
+                abs_x2 = min(screen_w - 1, abs_x1 + pw)
+                abs_y2 = min(screen_h - 1, abs_y1 + ph)
+
+                # Store constant clickable bounding box for this prayer
+                clicking_areas[prayer_key] = (abs_x1, abs_y1, abs_x2, abs_y2)
+                matched_prayers_count += 1
+
+                # Also update BASELINE_CLICKING_AREAS so future non-Prayer-tab scans preserve this slot
+                ox, oy = BASELINE_ORIGIN
+                BASELINE_CLICKING_AREAS[prayer_key] = (
+                    int(round(ox + (abs_x1 - origin_x) / ui_scale)),
+                    int(round(oy + (abs_y1 - origin_y) / ui_scale)),
+                    int(round(ox + (abs_x2 - origin_x) / ui_scale)),
+                    int(round(oy + (abs_y2 - origin_y) / ui_scale)),
                 )
-                if prayer_match is not None:
-                    pval, ploc, _, (pw, ph) = prayer_match
-                    pad = max(15, int(18 * ui_scale))
-                    searching_areas[extra_prayer] = (
-                        max(0, ploc[0] - pad),
-                        max(0, ploc[1] - pad),
-                        min(screen_w - 1, ploc[0] + pw + pad),
-                        min(screen_h - 1, ploc[1] + ph + pad),
+
+                # Tighten searching_areas for backwards compatibility
+                if prayer_key in searching_areas:
+                    pad = max(12, int(15 * ui_scale))
+                    searching_areas[prayer_key] = (
+                        max(0, abs_x1 - pad),
+                        max(0, abs_y1 - pad),
+                        min(screen_w - 1, abs_x2 + pad),
+                        min(screen_h - 1, abs_y2 + pad),
                     )
-                    print(f"  -> Matched '{extra_prayer}' at {ploc} (confidence={pval:.3f})")
+
+                # Save a clean anchor crop if the prayer is not currently lit up (inactive background)
+                icon_crop = panel_bgr[ploc[1]:ploc[1] + ph, ploc[0]:ploc[0] + pw]
+                if icon_crop.size > 0 and pval >= 0.80 and np.mean(icon_crop) < 95:
+                    cv2.imwrite(os.path.join(ANCHORS_DIR, f"{prayer_key}.png"), icon_crop)
+
+                print(f"  -> Calibrated prayer '{prayer_key}' box={clicking_areas[prayer_key]} (conf={pval:.3f})")
+
+    # While Prayer tab is open, save clean unselected crops for inventory_tag and magic_tag
+    if len(prayer_keys) >= 2 or matched_prayers_count >= 2:
+        for tab_key in ("inventory_tag", "magic_tag"):
+            tx1, ty1, tx2, ty2 = clicking_areas[tab_key]
+            crop = screen_bgr[ty1:ty2, tx1:tx2]
+            if crop.size > 0:
+                cv2.imwrite(os.path.join(ANCHORS_DIR, f"{tab_key}.png"), crop)
+        # Also save prayer_tag if it doesn't exist yet
+        prayer_tag_path = os.path.join(ANCHORS_DIR, "prayer_tag.png")
+        if not os.path.exists(prayer_tag_path):
+            tx1, ty1, tx2, ty2 = clicking_areas["prayer_tag"]
+            crop = screen_bgr[ty1:ty2, tx1:tx2]
+            if crop.size > 0:
+                cv2.imwrite(prayer_tag_path, crop)
 
     # Check if optional orb templates exist for quick_prayers / spec (handles arbitrary window height)
     for orb_key in ("quick_prayers", "spec"):
@@ -335,15 +411,8 @@ def refresh_areas():
                     _, oloc, _, (ow, oh) = orb_match
                     clicking_areas[orb_key] = (oloc[0], oloc[1], oloc[0] + ow, oloc[1] + oh)
 
-    # Auto-save tab anchor crops when calibrated from prayer icons
-    if len(prayer_keys) >= 2:
-        os.makedirs(ANCHORS_DIR, exist_ok=True)
-        for tab_key in ("prayer_tag", "inventory_tag", "magic_tag"):
-            tab_path = os.path.join(ANCHORS_DIR, f"{tab_key}.png")
-            tx1, ty1, tx2, ty2 = clicking_areas[tab_key]
-            crop = screen_bgr[ty1:ty2, tx1:tx2]
-            if crop.size > 0:
-                cv2.imwrite(tab_path, crop)
+    if opened_prayer_temporarily:
+        fast_click_spot(clicking_areas["inventory_tag"])
 
     save_areas_config()
     print(f"[Refresh] Areas updated successfully (origin=({int(origin_x)}, {int(origin_y)}), scale={ui_scale:.3f}).")
@@ -352,7 +421,7 @@ def refresh_areas():
 
 def on_f10_press(e):
     if e.event_type == keyboard.KEY_DOWN:
-        refresh_areas()
+        refresh_areas(open_prayer_tab=True)
 
 
 def weighted_random_point_in_area(area, center_weight=0.7):
@@ -416,10 +485,10 @@ def on_f4_press(e):
 def on_f5_press(e):
     if e.event_type == keyboard.KEY_DOWN:
         click_spot(clicking_areas["prayer_tag"])
-        time.sleep(random.uniform(0.05, 0.1))
-        find_and_click_image(clicking_areas["prot_mage"],searching_areas["prayers"])
-        time.sleep(random.uniform(0.05, 0.1))
-        find_and_click_image(clicking_areas["rigour"],searching_areas["rigour"])
+        time.sleep(random.uniform(0.05, 0.08))
+        click_spot(clicking_areas["prot_mage"])
+        time.sleep(random.uniform(0.05, 0.08))
+        click_spot(clicking_areas["rigour"])
         click_spot(clicking_areas["inventory_tag"])
 
 
@@ -428,10 +497,10 @@ def on_f5_press(e):
 def on_f6_press(e):
     if e.event_type == keyboard.KEY_DOWN:
         click_spot(clicking_areas["prayer_tag"])
-        time.sleep(random.uniform(0.05, 0.1))
-        find_and_click_image(clicking_areas["prot_range"],searching_areas["prayers"])
-        time.sleep(random.uniform(0.05, 0.1))
-        find_and_click_image(clicking_areas["rigour"],searching_areas["rigour"])
+        time.sleep(random.uniform(0.05, 0.08))
+        click_spot(clicking_areas["prot_range"])
+        time.sleep(random.uniform(0.05, 0.08))
+        click_spot(clicking_areas["rigour"])
         click_spot(clicking_areas["inventory_tag"])
 
 
@@ -440,8 +509,8 @@ def on_f6_press(e):
 def on_f7_press(e):
     if e.event_type == keyboard.KEY_DOWN:
         click_spot(clicking_areas["prayer_tag"])
-        time.sleep(random.uniform(0.05, 0.1))
-        find_and_click_image(clicking_areas["prot_melee"],searching_areas["prayers"])
+        time.sleep(random.uniform(0.05, 0.08))
+        click_spot(clicking_areas["prot_melee"])
         click_spot(clicking_areas["inventory_tag"])
 
 @timing_decorator
@@ -470,11 +539,12 @@ def emergency_teleport(source="manual"):
     time.sleep(random.uniform(0.015, 0.025))
     fast_click_spot(clicking_areas["last_inventory_spot"])
 
-    # Immediately switch to Prayer tab and click Protect Item in case teleblock landed
-    time.sleep(random.uniform(0.03, 0.05))
+    # Immediately switch to Prayer tab and click calibrated Protect Item spot in case teleblock landed
+    time.sleep(random.uniform(0.025, 0.04))
     fast_click_spot(clicking_areas["prayer_tag"])
-    time.sleep(random.uniform(0.06, 0.09))
-    find_and_click_image(clicking_areas["prot_item"], searching_areas["prot_item"])
+    time.sleep(random.uniform(0.03, 0.05))
+    fast_click_spot(clicking_areas["prot_item"])
+    time.sleep(random.uniform(0.015, 0.025))
     fast_click_spot(clicking_areas["inventory_tag"])
     print(f"[Teleport] Emergency teleport + Protect Item triggered ({source})!")
 
