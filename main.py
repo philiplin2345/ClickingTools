@@ -5,34 +5,56 @@ import random
 import numpy as np
 import cv2
 import functools
+import json
+import os
 from threading import Lock
 import threading
 from tqdm import tqdm
 
-# Previous area definitions remain the same
-clicking_areas={
-    "inventory_tag":(1957,873,1984,906),
-    "last_inventory_spot": (2048, 1267,2072, 1290),
-    "prayer_tag":(2056,874,2083,909),
-    "magic_tag":(2105,876,2136,905),
-    "spec":(1931,251, 1952,272),
-    "prot_mage":"images\protect_from_mage.png",
-    "prot_range":"images\protect_from_range.png",
-    "prot_melee":"images\protect_from_melee.png",
-    "rigour":"images/rigour.png",
-    "sgs":"images/sgs.png",
-    "rock1":(1363, 721, 1469, 817),
+CONFIG_FILE = "areas_config.json"
+ANCHORS_DIR = os.path.join("images", "anchors")
+
+# Baseline reference origin (top-left of searching_areas["prayers"] / prot_mage at 1.0x scale)
+BASELINE_ORIGIN = (1888, 1101)
+
+# Previous area definitions remain the same (used as 1.0x reference baseline)
+BASELINE_CLICKING_AREAS = {
+    "inventory_tag": (1957, 873, 1984, 906),
+    "last_inventory_spot": (2048, 1267, 2072, 1290),
+    "prayer_tag": (2056, 874, 2083, 909),
+    "magic_tag": (2105, 876, 2136, 905),
+    "spec": (1931, 251, 1952, 272),
+    "prot_mage": "images/protect_from_mage.png",
+    "prot_range": "images/protect_from_range.png",
+    "prot_melee": "images/protect_from_melee.png",
+    "rigour": "images/rigour.png",
+    "sgs": "images/sgs.png",
+    "rock1": (1363, 721, 1469, 817),
     "rock2": (1039, 463, 1159, 546),
     "rock3": (680, 756, 791, 854),
-    "quick_prayers": (1886,169,1897,182)
-
-
+    "quick_prayers": (1886, 169, 1897, 182)
 }
-searching_areas={
-    "prayers":(1888,1101,2054,1152),
-    "rigour": (1942, 1212, 1999, 1263),
-    "inventory": (1841, 928,2092, 1039)
+
+BASELINE_SEARCHING_AREAS = {
+    "prayers": (1875, 1090, 2068, 1165),
+    "rigour": (1925, 1195, 2018, 1280),
+    "inventory": (1835, 920, 2100, 1050)
 }
+
+# Reference templates and their top-left offset (dx, dy) from BASELINE_ORIGIN at 1.0x scale
+ANCHOR_TEMPLATES = [
+    ("prot_mage", "images/protect_from_mage.png", (0, 0)),
+    ("prot_range", "images/protect_from_range.png", (60, 0)),
+    ("prot_melee", "images/protect_from_melee.png", (120, 0)),
+    ("prayer_tag", os.path.join(ANCHORS_DIR, "prayer_tag.png"), (168, -227)),
+    ("inventory_tag", os.path.join(ANCHORS_DIR, "inventory_tag.png"), (69, -228)),
+    ("magic_tag", os.path.join(ANCHORS_DIR, "magic_tag.png"), (217, -225)),
+]
+
+clicking_areas = dict(BASELINE_CLICKING_AREAS)
+searching_areas = dict(BASELINE_SEARCHING_AREAS)
+ui_scale = 1.0
+
 areas_set1 = [
     (50, 50, 150, 150),
     (200, 200, 300, 300),
@@ -50,7 +72,7 @@ areas_set3 = [
     (1100, 200, 1200, 300),
     (1250, 350, 1350, 450)
 ]
-pyautogui.PAUSE=0.05
+pyautogui.PAUSE = 0.05
 last_execution_time = 0
 execution_lock = Lock()
 MIN_DELAY = 0.2  # Minimum delay in seconds
@@ -60,6 +82,7 @@ click_count = 0
 initial_point = None
 click_thread = None
 progress_bar = None
+
 
 def timing_decorator(func):
     @functools.wraps(func)  # Preserve the original function's metadata
@@ -71,6 +94,7 @@ def timing_decorator(func):
         print(f"Function '{func.__name__}' executed in {execution_time:.4f} seconds.")
         return result  # Return the result of the function
     return wrapper
+
 
 def throttle(func):
     @functools.wraps(func)
@@ -85,6 +109,241 @@ def throttle(func):
             last_execution_time = time.time()
         return result
     return wrapper
+
+
+def save_areas_config():
+    """Save current clicking_areas, searching_areas, and ui_scale to a JSON file."""
+    data = {
+        "ui_scale": ui_scale,
+        "clicking_areas": {
+            k: list(v) if isinstance(v, tuple) else v
+            for k, v in clicking_areas.items()
+        },
+        "searching_areas": {
+            k: list(v) if isinstance(v, tuple) else v
+            for k, v in searching_areas.items()
+        }
+    }
+    try:
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        print(f"[Config] Saved calibrated areas to '{CONFIG_FILE}' (scale={ui_scale:.3f}).")
+    except Exception as exc:
+        print(f"[Config] Failed to save config: {exc}")
+
+
+def load_areas_config():
+    """Load persisted clicking_areas, searching_areas, and ui_scale from disk if available."""
+    global clicking_areas, searching_areas, ui_scale
+    if not os.path.exists(CONFIG_FILE):
+        return False
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        ui_scale = float(data.get("ui_scale", 1.0))
+        for k, v in data.get("clicking_areas", {}).items():
+            clicking_areas[k] = tuple(v) if isinstance(v, list) else v
+        for k, v in data.get("searching_areas", {}).items():
+            searching_areas[k] = tuple(v) if isinstance(v, list) else v
+        print(f"[Config] Loaded calibrated areas from '{CONFIG_FILE}' (scale={ui_scale:.3f}).")
+        return True
+    except Exception as exc:
+        print(f"[Config] Failed to load '{CONFIG_FILE}': {exc}")
+        return False
+
+
+def match_template_multiscale(screen_gray, template_gray, scales=None, threshold=0.78):
+    """
+    Search for template_gray in screen_gray across candidate scales.
+    Returns (best_val, best_loc, best_scale, (matched_w, matched_h)) or None if below threshold.
+    """
+    if scales is None:
+        # Check 1.0 first; if strong match, return immediately for speed
+        scales = [1.0] + [round(s, 2) for s in np.linspace(0.6, 1.8, 25) if round(s, 2) != 1.0]
+
+    sh, sw = screen_gray.shape[:2]
+    th, tw = template_gray.shape[:2]
+
+    best_val = -1.0
+    best_loc = None
+    best_scale = 1.0
+    best_size = (tw, th)
+
+    for s in scales:
+        rw = max(4, int(round(tw * s)))
+        rh = max(4, int(round(th * s)))
+        if rw >= sw or rh >= sh:
+            continue
+
+        resized = template_gray if s == 1.0 else cv2.resize(
+            template_gray, (rw, rh), interpolation=cv2.INTER_AREA if s < 1.0 else cv2.INTER_LINEAR
+        )
+        res = cv2.matchTemplate(screen_gray, resized, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+
+        if max_val > best_val:
+            best_val = max_val
+            best_loc = max_loc
+            best_scale = s
+            best_size = (rw, rh)
+            # Early exit if 1.0x match is already very high confidence
+            if s == 1.0 and best_val >= 0.88:
+                break
+
+    if best_val >= threshold and best_loc is not None:
+        return best_val, best_loc, best_scale, best_size
+    return None
+
+
+def _derive_box(base_box, origin_x, origin_y, scale, screen_w, screen_h):
+    """Compute a scaled bounding box (x1, y1, x2, y2) from BASELINE_ORIGIN."""
+    bx1, by1, bx2, by2 = base_box
+    ox, oy = BASELINE_ORIGIN
+    x1 = int(round(origin_x + (bx1 - ox) * scale))
+    y1 = int(round(origin_y + (by1 - oy) * scale))
+    x2 = int(round(origin_x + (bx2 - ox) * scale))
+    y2 = int(round(origin_y + (by2 - oy) * scale))
+
+    x1 = max(0, min(x1, screen_w - 2))
+    y1 = max(0, min(y1, screen_h - 2))
+    x2 = max(x1 + 1, min(x2, screen_w - 1))
+    y2 = max(y1 + 1, min(y2, screen_h - 1))
+    return (x1, y1, x2, y2)
+
+
+@timing_decorator
+def refresh_areas():
+    """
+    Scan the full screen for reference icons (prayers or saved tab anchors),
+    derive all clicking_areas and searching_areas using relative offsets,
+    and persist them to CONFIG_FILE.
+    """
+    global clicking_areas, searching_areas, ui_scale
+
+    print("\n[Refresh] Scanning screen for OSRS UI reference icons...")
+    screenshot_pil = pyautogui.screenshot()
+    screen_bgr = cv2.cvtColor(np.array(screenshot_pil), cv2.COLOR_RGB2BGR)
+    screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
+    screen_h, screen_w = screen_gray.shape[:2]
+
+    matched_anchors = {}
+    for name, path, offset in ANCHOR_TEMPLATES:
+        if not os.path.exists(path):
+            continue
+        tmpl = cv2.imread(path, 0)
+        if tmpl is None:
+            continue
+        match = match_template_multiscale(screen_gray, tmpl, threshold=0.78)
+        if match is not None:
+            val, loc, scale_est, size = match
+            matched_anchors[name] = {
+                "val": val,
+                "loc": loc,
+                "scale": scale_est,
+                "size": size,
+                "offset": offset,
+            }
+            print(f"  -> Matched '{name}' at {loc} (confidence={val:.3f}, scale={scale_est:.2f})")
+
+    if not matched_anchors:
+        print(
+            "[Refresh] Could not find reference icons on screen. "
+            "Make sure the OSRS Prayer tab is open and visible, then press F10 to rescan."
+        )
+        return False
+
+    # Determine UI scale from template match scale (1.0 when templates match natively)
+    ui_scale = float(np.median([m["scale"] for m in matched_anchors.values()]))
+
+    # Compute the current screen position of BASELINE_ORIGIN from the matched anchors
+    origin_estimates_x = []
+    origin_estimates_y = []
+    for m in matched_anchors.values():
+        ox_est = m["loc"][0] - m["offset"][0] * ui_scale
+        oy_est = m["loc"][1] - m["offset"][1] * ui_scale
+        origin_estimates_x.append(ox_est)
+        origin_estimates_y.append(oy_est)
+
+    origin_x = float(np.median(origin_estimates_x))
+    origin_y = float(np.median(origin_estimates_y))
+
+    # Update all coordinate tuple entries in clicking_areas and searching_areas
+    for key, base_val in BASELINE_CLICKING_AREAS.items():
+        if isinstance(base_val, tuple):
+            clicking_areas[key] = _derive_box(base_val, origin_x, origin_y, ui_scale, screen_w, screen_h)
+        else:
+            clicking_areas[key] = base_val
+
+    for key, base_val in BASELINE_SEARCHING_AREAS.items():
+        if isinstance(base_val, tuple):
+            searching_areas[key] = _derive_box(base_val, origin_x, origin_y, ui_scale, screen_w, screen_h)
+
+    # If protection prayers were directly matched, tighten searching_areas["prayers"] around them with padding
+    prayer_keys = [k for k in ("prot_mage", "prot_range", "prot_melee") if k in matched_anchors]
+    if len(prayer_keys) >= 2:
+        pad = max(12, int(15 * ui_scale))
+        px1 = min(matched_anchors[k]["loc"][0] for k in prayer_keys) - pad
+        py1 = min(matched_anchors[k]["loc"][1] for k in prayer_keys) - pad
+        px2 = max(matched_anchors[k]["loc"][0] + matched_anchors[k]["size"][0] for k in prayer_keys) + pad
+        py2 = max(matched_anchors[k]["loc"][1] + matched_anchors[k]["size"][1] for k in prayer_keys) + pad
+        searching_areas["prayers"] = (
+            max(0, px1),
+            max(0, py1),
+            min(screen_w - 1, px2),
+            min(screen_h - 1, py2),
+        )
+
+    # Also locate rigour directly if visible on screen so searching_areas["rigour"] is exact
+    rigour_path = clicking_areas.get("rigour", "images/rigour.png")
+    if isinstance(rigour_path, str) and os.path.exists(rigour_path):
+        rigour_tmpl = cv2.imread(rigour_path, 0)
+        if rigour_tmpl is not None:
+            rigour_match = match_template_multiscale(
+                screen_gray, rigour_tmpl, scales=[ui_scale, 1.0], threshold=0.78
+            )
+            if rigour_match is not None:
+                rval, rloc, _, (rw, rh) = rigour_match
+                pad = max(15, int(18 * ui_scale))
+                searching_areas["rigour"] = (
+                    max(0, rloc[0] - pad),
+                    max(0, rloc[1] - pad),
+                    min(screen_w - 1, rloc[0] + rw + pad),
+                    min(screen_h - 1, rloc[1] + rh + pad),
+                )
+                print(f"  -> Matched 'rigour' at {rloc} (confidence={rval:.3f})")
+
+    # Check if optional orb templates exist for quick_prayers / spec (handles arbitrary window height)
+    for orb_key in ("quick_prayers", "spec"):
+        orb_path = os.path.join(ANCHORS_DIR, f"{orb_key}.png")
+        if os.path.exists(orb_path):
+            orb_tmpl = cv2.imread(orb_path, 0)
+            if orb_tmpl is not None:
+                orb_match = match_template_multiscale(
+                    screen_gray, orb_tmpl, scales=[ui_scale, 1.0], threshold=0.80
+                )
+                if orb_match is not None:
+                    _, oloc, _, (ow, oh) = orb_match
+                    clicking_areas[orb_key] = (oloc[0], oloc[1], oloc[0] + ow, oloc[1] + oh)
+
+    # Auto-save tab anchor crops when calibrated from prayer icons
+    if len(prayer_keys) >= 2:
+        os.makedirs(ANCHORS_DIR, exist_ok=True)
+        for tab_key in ("prayer_tag", "inventory_tag", "magic_tag"):
+            tab_path = os.path.join(ANCHORS_DIR, f"{tab_key}.png")
+            tx1, ty1, tx2, ty2 = clicking_areas[tab_key]
+            crop = screen_bgr[ty1:ty2, tx1:tx2]
+            if crop.size > 0:
+                cv2.imwrite(tab_path, crop)
+
+    save_areas_config()
+    print(f"[Refresh] Areas updated successfully (origin=({int(origin_x)}, {int(origin_y)}), scale={ui_scale:.3f}).")
+    return True
+
+
+def on_f10_press(e):
+    if e.event_type == keyboard.KEY_DOWN:
+        refresh_areas()
+
 
 def weighted_random_point_in_area(area, center_weight=0.7):
     x_min, y_min, x_max, y_max = area
@@ -207,14 +466,30 @@ SEARCH_AREA = (500, 300, 1000, 600)  # Adjust these coordinates as needed
 def find_and_click_image(image_path,search_area):
     start_time = time.time()
     
-    # Take a screenshot of only the search area
-    x_min, y_min, x_max, y_max = search_area
-    screenshot = pyautogui.screenshot(region=(x_min, y_min, x_max - x_min, y_max - y_min))
-    screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+    # Read the template image first so we can ensure search_area is at least as large as template
     before_read_time = time.time()
-    # Read the template image
     template = cv2.imread(image_path, 0)
+    if template is None:
+        print(f"Template image not found or unreadable: {image_path}")
+        return
+    if ui_scale != 1.0:
+        th, tw = template.shape[:2]
+        rw = max(4, int(round(tw * ui_scale)))
+        rh = max(4, int(round(th * ui_scale)))
+        template = cv2.resize(
+            template, (rw, rh), interpolation=cv2.INTER_AREA if ui_scale < 1.0 else cv2.INTER_LINEAR
+        )
     after_read_time = time.time()
+
+    # Ensure search area is at least as large as the template to prevent OpenCV assertion errors
+    x_min, y_min, x_max, y_max = search_area
+    th, tw = template.shape[:2]
+    region_w = max(x_max - x_min, tw + 10)
+    region_h = max(y_max - y_min, th + 10)
+
+    # Take a screenshot of only the search area
+    screenshot = pyautogui.screenshot(region=(x_min, y_min, region_w, region_h))
+    screenshot = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
     # Perform template matching
     result = cv2.matchTemplate(cv2.cvtColor(screenshot, cv2.COLOR_BGR2GRAY), template, cv2.TM_CCOEFF_NORMED)
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
@@ -317,16 +592,23 @@ def toggle_clicking(e):
             stop_clicking()
 
 
-# Set up the listeners for F5, F6, F7, and F8 keys
+# Load persisted areas if available, then attempt an initial screen scan
+load_areas_config()
+refresh_areas()
+
+# Set up the listeners for F4-F10 and Esc keys
 keyboard.on_press_key("f4", on_f4_press)
 keyboard.on_press_key("f5", on_f5_press)
 keyboard.on_press_key("f6", on_f6_press)
 keyboard.on_press_key("f7", on_f7_press)
 keyboard.on_press_key("f8", on_f8_press)
 keyboard.on_press_key("f9", toggle_clicking)
+keyboard.on_press_key("f10", on_f10_press)
 keyboard.on_press_key("esc", on_esc_press)
 # keyboard.on_press_key("f12", on_f12_press)
-print("Listening for F5, F6, F7, and F8 key presses. Press Ctrl+C to exit.")
+print("Listening for F4-F9, Esc, and F10 (refresh areas) key presses. Press Ctrl+C to exit.")
 
 # Keep the script running
+keyboard.wait()
+
 keyboard.wait()
