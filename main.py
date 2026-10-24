@@ -25,12 +25,12 @@ BASELINE_CLICKING_AREAS = {
     "magic_tag": (2105, 876, 2136, 905),
     "spec": (1931, 251, 1952, 272),
     "prot_mage": (1888, 1101, 1927, 1143),
-    "prot_range": (1948, 1101, 1985, 1138),
-    "prot_melee": (2008, 1101, 2054, 1147),
-    "prot_item": (1820, 1040, 1881, 1091),
-    "rigour": (1943, 1213, 1992, 1264),
-    "augury": (2003, 1213, 2045, 1252),
-    "piety": (2068, 1157, 2114, 1181),
+    "prot_range": (1946, 1106, 1983, 1143),
+    "prot_melee": (1998, 1099, 2044, 1145),
+    "prot_item": (1829, 1045, 1877, 1091),
+    "rigour": (1941, 1215, 1986, 1253),
+    "augury": (1998, 1216, 2040, 1255),
+    "piety": (1884, 1223, 1930, 1247),
     "sgs": "images/sgs.png",
     "rock1": (1363, 721, 1469, 817),
     "rock2": (1039, 463, 1159, 546),
@@ -50,12 +50,15 @@ PRAYER_TEMPLATES = {
 }
 
 BASELINE_SEARCHING_AREAS = {
-    "prayers": (1875, 1090, 2068, 1165),
-    "rigour": (1925, 1195, 2018, 1280),
-    "augury": (1795, 910, 2135, 1320),
-    "piety": (1795, 910, 2135, 1320),
-    "prot_item": (1795, 910, 2135, 1320),
-    "prayer_panel": (1795, 910, 2135, 1320),
+    "prayers": (1886, 1097, 2046, 1147),
+    "prot_mage": (1886, 1099, 1929, 1145),
+    "prot_range": (1944, 1104, 1985, 1145),
+    "prot_melee": (1996, 1097, 2046, 1147),
+    "prot_item": (1827, 1043, 1879, 1093),
+    "rigour": (1939, 1213, 1988, 1255),
+    "augury": (1996, 1214, 2042, 1257),
+    "piety": (1882, 1221, 1932, 1249),
+    "prayer_panel": (1820, 1035, 2055, 1265),
     "inventory": (1835, 920, 2100, 1050),
     "alarm_patch": (1600, 920, 1640, 960)
 }
@@ -63,11 +66,11 @@ BASELINE_SEARCHING_AREAS = {
 # Reference templates and their top-left offset (dx, dy) from BASELINE_ORIGIN at 1.0x scale
 ANCHOR_TEMPLATES = [
     ("prot_mage", "images/protect_from_mage.png", (0, 0)),
-    ("prot_range", "images/protect_from_range.png", (60, 0)),
-    ("prot_melee", "images/protect_from_melee.png", (120, 0)),
-    ("prayer_tag", os.path.join(ANCHORS_DIR, "prayer_tag.png"), (168, -227)),
-    ("inventory_tag", os.path.join(ANCHORS_DIR, "inventory_tag.png"), (69, -228)),
-    ("magic_tag", os.path.join(ANCHORS_DIR, "magic_tag.png"), (217, -225)),
+    ("prot_range", "images/protect_from_range.png", (58, 5)),
+    ("prot_melee", "images/protect_from_melee.png", (110, -2)),
+    ("prayer_tag", os.path.join(ANCHORS_DIR, "prayer_tag.png"), (166, -227)),
+    ("inventory_tag", os.path.join(ANCHORS_DIR, "inventory_tag.png"), (67, -227)),
+    ("magic_tag", os.path.join(ANCHORS_DIR, "magic_tag.png"), (215, -224)),
 ]
 
 clicking_areas = dict(BASELINE_CLICKING_AREAS)
@@ -247,6 +250,29 @@ def _derive_box(base_box, origin_x, origin_y, scale, screen_w, screen_h):
     return (x1, y1, x2, y2)
 
 
+# In-memory grayscale template cache: (path, ui_scale) -> np.ndarray
+_template_cache = {}
+
+
+def get_cached_template(image_path):
+    """Load and cache grayscale template image in memory so keypresses don't hit disk."""
+    key = (image_path, ui_scale)
+    if key in _template_cache:
+        return _template_cache[key]
+    template = cv2.imread(image_path, 0)
+    if template is None:
+        return None
+    if ui_scale != 1.0 and not str(image_path).startswith(ANCHORS_DIR):
+        th, tw = template.shape[:2]
+        rw = max(4, int(round(tw * ui_scale)))
+        rh = max(4, int(round(th * ui_scale)))
+        template = cv2.resize(
+            template, (rw, rh), interpolation=cv2.INTER_AREA if ui_scale < 1.0 else cv2.INTER_LINEAR
+        )
+    _template_cache[key] = template
+    return template
+
+
 def auto_trim_crop(crop_bgr, margin=1):
     """Trim uniform background borders around an icon crop, keeping a `margin`-pixel border."""
     if crop_bgr is None or crop_bgr.size == 0:
@@ -356,8 +382,8 @@ def refresh_areas(open_prayer_tab=False):
         screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
         opened_prayer_temporarily = True
 
-    # Scan the Prayer panel for all 5 prayers in PRAYER_TEMPLATES to lock in their exact coordinates
-    px1, py1, px2, py2 = searching_areas.get("prayer_panel", (1795, 910, 2135, 1320))
+    # Scan the Prayer panel for all prayers in PRAYER_TEMPLATES to lock in their exact coordinates
+    px1, py1, px2, py2 = searching_areas.get("prayer_panel", (1820, 1035, 2055, 1265))
     panel_gray = screen_gray[py1:py2, px1:px2]
     panel_bgr = screen_bgr[py1:py2, px1:px2]
 
@@ -392,22 +418,21 @@ def refresh_areas(open_prayer_tab=False):
                     int(round(oy + (abs_y2 - origin_y) / ui_scale)),
                 )
 
-                # Tighten searching_areas for backwards compatibility
-                if prayer_key in searching_areas:
-                    pad = max(12, int(15 * ui_scale))
-                    searching_areas[prayer_key] = (
-                        max(0, abs_x1 - pad),
-                        max(0, abs_y1 - pad),
-                        min(screen_w - 1, abs_x2 + pad),
-                        min(screen_h - 1, abs_y2 + pad),
-                    )
+                # Tighten runtime searching_areas[prayer_key] to just the icon size (+2px margin) for fastest matching
+                pad = max(2, int(round(2 * ui_scale)))
+                searching_areas[prayer_key] = (
+                    max(0, abs_x1 - pad),
+                    max(0, abs_y1 - pad),
+                    min(screen_w - 1, abs_x2 + pad),
+                    min(screen_h - 1, abs_y2 + pad),
+                )
 
                 # Save a clean, tightly-trimmed anchor crop if the prayer is not currently lit up
                 icon_crop = panel_bgr[ploc[1]:ploc[1] + ph, ploc[0]:ploc[0] + pw]
                 if icon_crop.size > 0 and pval >= 0.80 and np.mean(icon_crop) < 95:
                     cv2.imwrite(os.path.join(ANCHORS_DIR, f"{prayer_key}.png"), auto_trim_crop(icon_crop, margin=1))
 
-                print(f"  -> Calibrated prayer '{prayer_key}' box={clicking_areas[prayer_key]} (conf={pval:.3f})")
+                print(f"  -> Calibrated prayer '{prayer_key}' box={clicking_areas[prayer_key]} search={searching_areas[prayer_key]} (conf={pval:.3f})")
 
     # While Prayer tab is open, save clean unselected crops for inventory_tag and magic_tag
     if len(prayer_keys) >= 2 or matched_prayers_count >= 2:
@@ -440,6 +465,7 @@ def refresh_areas(open_prayer_tab=False):
     if opened_prayer_temporarily:
         fast_click_spot(clicking_areas["inventory_tag"])
 
+    _template_cache.clear()
     save_areas_config()
     print(f"[Refresh] Areas updated successfully (origin=({int(origin_x)}, {int(origin_y)}), scale={ui_scale:.3f}).")
     return True
@@ -519,75 +545,100 @@ def is_prayer_active_glow(patch_bgr):
 
 
 @timing_decorator
+def activate_prayers(*prayer_keys):
+    """
+    Check and activate one or more prayers using a SINGLE screenshot for all of them.
+    Skips any prayer that is already active (max_val <= 0.80) so it never toggles an active prayer OFF.
+    """
+    tasks = []
+    pad = max(2, int(round(2 * ui_scale)))
+    for pk in prayer_keys:
+        anchor_crop_path = os.path.join(ANCHORS_DIR, f"{pk}.png")
+        tmpl_path = anchor_crop_path if os.path.exists(anchor_crop_path) else PRAYER_TEMPLATES.get(pk)
+        tmpl = get_cached_template(tmpl_path) if tmpl_path else None
+        if tmpl is None:
+            continue
+        th, tw = tmpl.shape[:2]
+        box = clicking_areas.get(pk)
+        if isinstance(box, tuple) and len(box) == 4:
+            x1, y1, x2, y2 = box
+            sbox = searching_areas.get(pk, (max(0, x1 - pad), max(0, y1 - pad), x2 + pad, y2 + pad))
+        else:
+            sbox = searching_areas.get("prayer_panel", searching_areas["prayers"])
+        sx1, sy1, sx2, sy2 = sbox
+        sx2 = max(sx2, sx1 + tw + 2)
+        sy2 = max(sy2, sy1 + th + 2)
+        tasks.append((pk, tmpl, (sx1, sy1, sx2, sy2)))
+
+    if not tasks:
+        return
+
+    # Grab ONE screenshot covering the bounding box of all requested prayers
+    ux1 = min(t[2][0] for t in tasks)
+    uy1 = min(t[2][1] for t in tasks)
+    ux2 = max(t[2][2] for t in tasks)
+    uy2 = max(t[2][3] for t in tasks)
+
+    shot = pyautogui.screenshot(region=(ux1, uy1, ux2 - ux1, uy2 - uy1))
+    union_gray = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2GRAY)
+
+    clicked_any = False
+    for pk, tmpl, (sx1, sy1, sx2, sy2) in tasks:
+        sub_gray = union_gray[sy1 - uy1:sy2 - uy1, sx1 - ux1:sx2 - ux1]
+        th, tw = tmpl.shape[:2]
+        if sub_gray.shape[0] < th or sub_gray.shape[1] < tw:
+            continue
+        res = cv2.matchTemplate(sub_gray, tmpl, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, max_loc = cv2.minMaxLoc(res)
+        if max_val > 0.8:
+            matched_box = (
+                sx1 + max_loc[0],
+                sy1 + max_loc[1],
+                sx1 + max_loc[0] + tw,
+                sy1 + max_loc[1] + th,
+            )
+            clicking_areas[pk] = matched_box
+            if clicked_any:
+                time.sleep(random.uniform(0.015, 0.025))
+            fast_click_spot(matched_box)
+            clicked_any = True
+            print(f"[Prayer] Activated '{pk}' (max_val={max_val:.3f})")
+        else:
+            print(f"[Prayer] '{pk}' already active or not matched (max_val={max_val:.3f}) — skipping.")
+
+
 def activate_prayer(prayer_key):
-    """
-    Ensure `prayer_key` is turned ON without toggling it OFF if already active.
-    Uses the calibrated search area if its anchor crop exists, or searches the full
-    prayer_panel if the prayer hasn't been calibrated yet.
-    """
-    anchor_crop_path = os.path.join(ANCHORS_DIR, f"{prayer_key}.png")
-    has_calibrated_crop = os.path.exists(anchor_crop_path)
-    tmpl_path = anchor_crop_path if has_calibrated_crop else PRAYER_TEMPLATES.get(prayer_key)
-
-    box = clicking_areas.get(prayer_key)
-    if has_calibrated_crop and isinstance(box, tuple) and len(box) == 4:
-        x1, y1, x2, y2 = box
-        # 1. Quick check on the calibrated prayer slot to see if the yellow active glow is already present
-        slot_w = max(8, x2 - x1)
-        slot_h = max(8, y2 - y1)
-        slot_shot = pyautogui.screenshot(region=(x1, y1, slot_w, slot_h))
-        slot_bgr = cv2.cvtColor(np.array(slot_shot), cv2.COLOR_RGB2BGR)
-        if is_prayer_active_glow(slot_bgr):
-            print(f"[Prayer] '{prayer_key}' is already ACTIVE (glow detected) — skipping click.")
-            return False
-
-        pad = max(14, int(18 * ui_scale))
-        search_box = (max(0, x1 - pad), max(0, y1 - pad), x2 + pad, y2 + pad)
-    else:
-        # Prayer hasn't been calibrated on the Prayer tab yet; search the full prayer_panel
-        search_box = searching_areas.get("prayer_panel", searching_areas.get(prayer_key, searching_areas["prayers"]))
-
-    matched_area = find_and_click_image(tmpl_path, search_box)
-    if isinstance(matched_area, tuple) and len(matched_area) == 4:
-        clicking_areas[prayer_key] = matched_area
-        return True
-    return False
+    activate_prayers(prayer_key)
 
 
 @timing_decorator
 # @throttle
 def on_f5_press(e):
     if e.event_type == keyboard.KEY_DOWN:
-        click_spot(clicking_areas["prayer_tag"])
-        time.sleep(random.uniform(0.05, 0.08))
-        activate_prayer("prot_mage")
-        time.sleep(random.uniform(0.05, 0.08))
-        activate_prayer("augury")
-        click_spot(clicking_areas["inventory_tag"])
+        fast_click_spot(clicking_areas["prayer_tag"])
+        time.sleep(random.uniform(0.065, 0.08))
+        activate_prayers("prot_mage", "augury")
+        fast_click_spot(clicking_areas["inventory_tag"])
 
 
 @timing_decorator
 # @throttle
 def on_f6_press(e):
     if e.event_type == keyboard.KEY_DOWN:
-        click_spot(clicking_areas["prayer_tag"])
-        time.sleep(random.uniform(0.05, 0.08))
-        activate_prayer("prot_range")
-        time.sleep(random.uniform(0.05, 0.08))
-        activate_prayer("rigour")
-        click_spot(clicking_areas["inventory_tag"])
+        fast_click_spot(clicking_areas["prayer_tag"])
+        time.sleep(random.uniform(0.065, 0.08))
+        activate_prayers("prot_range", "rigour")
+        fast_click_spot(clicking_areas["inventory_tag"])
 
 
 @timing_decorator
 # @throttle
 def on_f7_press(e):
     if e.event_type == keyboard.KEY_DOWN:
-        click_spot(clicking_areas["prayer_tag"])
-        time.sleep(random.uniform(0.05, 0.08))
-        activate_prayer("prot_melee")
-        time.sleep(random.uniform(0.05, 0.08))
-        activate_prayer("piety")
-        click_spot(clicking_areas["inventory_tag"])
+        fast_click_spot(clicking_areas["prayer_tag"])
+        time.sleep(random.uniform(0.065, 0.08))
+        activate_prayers("prot_melee", "piety")
+        fast_click_spot(clicking_areas["inventory_tag"])
 
 @timing_decorator
 # @throttle
@@ -617,11 +668,11 @@ def emergency_teleport(source="manual"):
     fast_click_spot(clicking_areas["last_inventory_spot"])
 
     # Switch to Prayer tab, wait for it to render, and enable Protect Item (only if not already active)
-    time.sleep(random.uniform(0.04, 0.06))
-    click_spot(clicking_areas["prayer_tag"])
-    time.sleep(random.uniform(0.08, 0.11))
-    activate_prayer("prot_item")
-    click_spot(clicking_areas["inventory_tag"])
+    time.sleep(random.uniform(0.03, 0.045))
+    fast_click_spot(clicking_areas["prayer_tag"])
+    time.sleep(random.uniform(0.065, 0.08))
+    activate_prayers("prot_item")
+    fast_click_spot(clicking_areas["inventory_tag"])
     print(f"[Teleport] Emergency teleport + Protect Item triggered ({source})!")
 
 
@@ -730,8 +781,8 @@ def find_and_click_image(image_path, search_area, fast=False):
     # Ensure search area is at least as large as the template to prevent OpenCV assertion errors
     x_min, y_min, x_max, y_max = search_area
     th, tw = template.shape[:2]
-    region_w = max(x_max - x_min, tw + 10)
-    region_h = max(y_max - y_min, th + 10)
+    region_w = max(x_max - x_min, tw + 2)
+    region_h = max(y_max - y_min, th + 2)
 
     # Take a screenshot of only the search area
     screenshot = pyautogui.screenshot(region=(x_min, y_min, region_w, region_h))
