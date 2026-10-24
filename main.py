@@ -27,8 +27,9 @@ BASELINE_CLICKING_AREAS = {
     "prot_mage": (1888, 1101, 1927, 1143),
     "prot_range": (1948, 1101, 1985, 1138),
     "prot_melee": (2008, 1101, 2054, 1147),
-    "prot_item": (1830, 1101, 1875, 1145),
+    "prot_item": (1820, 1040, 1881, 1091),
     "rigour": (1943, 1213, 1992, 1264),
+    "piety": (2068, 1157, 2114, 1181),
     "sgs": "images/sgs.png",
     "rock1": (1363, 721, 1469, 817),
     "rock2": (1039, 463, 1159, 546),
@@ -43,13 +44,15 @@ PRAYER_TEMPLATES = {
     "prot_melee": "images/protect_from_melee.png",
     "prot_item": "images/protect_item.png",
     "rigour": "images/rigour.png",
+    "piety": "images/piety.png",
 }
 
 BASELINE_SEARCHING_AREAS = {
     "prayers": (1875, 1090, 2068, 1165),
     "rigour": (1925, 1195, 2018, 1280),
-    "prot_item": (1835, 920, 2115, 1300),
-    "prayer_panel": (1835, 920, 2115, 1300),
+    "piety": (1795, 910, 2135, 1320),
+    "prot_item": (1795, 910, 2135, 1320),
+    "prayer_panel": (1795, 910, 2135, 1320),
     "inventory": (1835, 920, 2100, 1050),
     "alarm_patch": (1600, 920, 1640, 960)
 }
@@ -241,6 +244,23 @@ def _derive_box(base_box, origin_x, origin_y, scale, screen_w, screen_h):
     return (x1, y1, x2, y2)
 
 
+def auto_trim_crop(crop_bgr, margin=1):
+    """Trim uniform background borders around an icon crop, keeping a `margin`-pixel border."""
+    if crop_bgr is None or crop_bgr.size == 0:
+        return crop_bgr
+    h, w = crop_bgr.shape[:2]
+    bg = crop_bgr[0, 0].astype(np.int16)
+    diff = np.abs(crop_bgr.astype(np.int16) - bg).max(axis=2)
+    ys, xs = np.where(diff > 15)
+    if len(xs) == 0 or len(ys) == 0:
+        return crop_bgr
+    x1 = max(0, int(xs.min()) - margin)
+    y1 = max(0, int(ys.min()) - margin)
+    x2 = min(w, int(xs.max()) + 1 + margin)
+    y2 = min(h, int(ys.max()) + 1 + margin)
+    return crop_bgr[y1:y2, x1:x2]
+
+
 @timing_decorator
 def refresh_areas(open_prayer_tab=False):
     """
@@ -313,9 +333,12 @@ def refresh_areas(open_prayer_tab=False):
 
     os.makedirs(ANCHORS_DIR, exist_ok=True)
     opened_prayer_temporarily = False
+    missing_prayer_anchors = any(
+        not os.path.exists(os.path.join(ANCHORS_DIR, f"{pk}.png")) for pk in PRAYER_TEMPLATES
+    )
 
-    # If Prayer tab is not currently open during F10 calibration, open it briefly to scan exact prayer positions
-    if len(prayer_keys) < 2 and open_prayer_tab:
+    # If Prayer tab is not currently open during F10 calibration (or if any prayer anchor is missing), open it briefly
+    if len(prayer_keys) < 2 and (open_prayer_tab or missing_prayer_anchors):
         # While Prayer tab is closed, crop a clean unselected prayer_tag anchor
         px1, py1, px2, py2 = clicking_areas["prayer_tag"]
         p_crop = screen_bgr[py1:py2, px1:px2]
@@ -323,15 +346,15 @@ def refresh_areas(open_prayer_tab=False):
             cv2.imwrite(os.path.join(ANCHORS_DIR, "prayer_tag.png"), p_crop)
 
         print("  -> Opening Prayer tab briefly to calibrate exact prayer icon positions...")
-        fast_click_spot(clicking_areas["prayer_tag"])
-        time.sleep(0.10)
+        click_spot(clicking_areas["prayer_tag"])
+        time.sleep(0.15)
         screenshot_pil = pyautogui.screenshot()
         screen_bgr = cv2.cvtColor(np.array(screenshot_pil), cv2.COLOR_RGB2BGR)
         screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
         opened_prayer_temporarily = True
 
     # Scan the Prayer panel for all 5 prayers in PRAYER_TEMPLATES to lock in their exact coordinates
-    px1, py1, px2, py2 = searching_areas.get("prayer_panel", (1835, 920, 2115, 1300))
+    px1, py1, px2, py2 = searching_areas.get("prayer_panel", (1795, 910, 2135, 1320))
     panel_gray = screen_gray[py1:py2, px1:px2]
     panel_bgr = screen_bgr[py1:py2, px1:px2]
 
@@ -376,10 +399,10 @@ def refresh_areas(open_prayer_tab=False):
                         min(screen_h - 1, abs_y2 + pad),
                     )
 
-                # Save a clean anchor crop if the prayer is not currently lit up (inactive background)
+                # Save a clean, tightly-trimmed anchor crop if the prayer is not currently lit up
                 icon_crop = panel_bgr[ploc[1]:ploc[1] + ph, ploc[0]:ploc[0] + pw]
                 if icon_crop.size > 0 and pval >= 0.80 and np.mean(icon_crop) < 95:
-                    cv2.imwrite(os.path.join(ANCHORS_DIR, f"{prayer_key}.png"), icon_crop)
+                    cv2.imwrite(os.path.join(ANCHORS_DIR, f"{prayer_key}.png"), auto_trim_crop(icon_crop, margin=1))
 
                 print(f"  -> Calibrated prayer '{prayer_key}' box={clicking_areas[prayer_key]} (conf={pval:.3f})")
 
@@ -480,15 +503,63 @@ def on_f4_press(e):
         click_spot(clicking_areas["inventory_tag"])
 
 
+def is_prayer_active_glow(patch_bgr):
+    """
+    Check if an OSRS prayer slot already has the bright beige/yellow active glow behind the icon.
+    Inactive prayer background is dark stone (~BGR 38, 48, 55); active glow is bright (~BGR 100, 185, 205).
+    """
+    b = patch_bgr[:, :, 0].astype(np.int16)
+    g = patch_bgr[:, :, 1].astype(np.int16)
+    r = patch_bgr[:, :, 2].astype(np.int16)
+    glow_mask = (r >= 145) & (g >= 125) & ((r - b) >= 35)
+    return float(np.mean(glow_mask)) >= 0.15
+
+
+@timing_decorator
+def activate_prayer(prayer_key):
+    """
+    Ensure `prayer_key` is turned ON without toggling it OFF if already active.
+    Uses the calibrated search area if its anchor crop exists, or searches the full
+    prayer_panel if the prayer hasn't been calibrated yet.
+    """
+    anchor_crop_path = os.path.join(ANCHORS_DIR, f"{prayer_key}.png")
+    has_calibrated_crop = os.path.exists(anchor_crop_path)
+    tmpl_path = anchor_crop_path if has_calibrated_crop else PRAYER_TEMPLATES.get(prayer_key)
+
+    box = clicking_areas.get(prayer_key)
+    if has_calibrated_crop and isinstance(box, tuple) and len(box) == 4:
+        x1, y1, x2, y2 = box
+        # 1. Quick check on the calibrated prayer slot to see if the yellow active glow is already present
+        slot_w = max(8, x2 - x1)
+        slot_h = max(8, y2 - y1)
+        slot_shot = pyautogui.screenshot(region=(x1, y1, slot_w, slot_h))
+        slot_bgr = cv2.cvtColor(np.array(slot_shot), cv2.COLOR_RGB2BGR)
+        if is_prayer_active_glow(slot_bgr):
+            print(f"[Prayer] '{prayer_key}' is already ACTIVE (glow detected) — skipping click.")
+            return False
+
+        pad = max(14, int(18 * ui_scale))
+        search_box = (max(0, x1 - pad), max(0, y1 - pad), x2 + pad, y2 + pad)
+    else:
+        # Prayer hasn't been calibrated on the Prayer tab yet; search the full prayer_panel
+        search_box = searching_areas.get("prayer_panel", searching_areas.get(prayer_key, searching_areas["prayers"]))
+
+    matched_area = find_and_click_image(tmpl_path, search_box)
+    if isinstance(matched_area, tuple) and len(matched_area) == 4:
+        clicking_areas[prayer_key] = matched_area
+        return True
+    return False
+
+
 @timing_decorator
 # @throttle
 def on_f5_press(e):
     if e.event_type == keyboard.KEY_DOWN:
         click_spot(clicking_areas["prayer_tag"])
         time.sleep(random.uniform(0.05, 0.08))
-        click_spot(clicking_areas["prot_mage"])
+        activate_prayer("prot_mage")
         time.sleep(random.uniform(0.05, 0.08))
-        click_spot(clicking_areas["rigour"])
+        activate_prayer("rigour")
         click_spot(clicking_areas["inventory_tag"])
 
 
@@ -498,9 +569,9 @@ def on_f6_press(e):
     if e.event_type == keyboard.KEY_DOWN:
         click_spot(clicking_areas["prayer_tag"])
         time.sleep(random.uniform(0.05, 0.08))
-        click_spot(clicking_areas["prot_range"])
+        activate_prayer("prot_range")
         time.sleep(random.uniform(0.05, 0.08))
-        click_spot(clicking_areas["rigour"])
+        activate_prayer("rigour")
         click_spot(clicking_areas["inventory_tag"])
 
 
@@ -510,7 +581,9 @@ def on_f7_press(e):
     if e.event_type == keyboard.KEY_DOWN:
         click_spot(clicking_areas["prayer_tag"])
         time.sleep(random.uniform(0.05, 0.08))
-        click_spot(clicking_areas["prot_melee"])
+        activate_prayer("prot_melee")
+        time.sleep(random.uniform(0.05, 0.08))
+        activate_prayer("piety")
         click_spot(clicking_areas["inventory_tag"])
 
 @timing_decorator
@@ -524,9 +597,10 @@ def on_f8_press(e):
         click_spot(clicking_areas["spec"])
     
 def fast_click_spot(area):
-    """Click a spot immediately bypassing pyautogui's global 50ms pause per action."""
+    """Click a spot with minimal hover delay so OSRS registers the cursor position before clicking."""
     spot = weighted_random_point_in_area(area)
     pyautogui.moveTo(spot[0], spot[1], _pause=False)
+    time.sleep(random.uniform(0.025, 0.035))
     pyautogui.click(spot[0], spot[1], _pause=False)
 
 
@@ -536,16 +610,15 @@ def emergency_teleport(source="manual"):
     global clicking
     clicking = False
     fast_click_spot(clicking_areas["inventory_tag"])
-    time.sleep(random.uniform(0.015, 0.025))
+    time.sleep(random.uniform(0.02, 0.03))
     fast_click_spot(clicking_areas["last_inventory_spot"])
 
-    # Immediately switch to Prayer tab and click calibrated Protect Item spot in case teleblock landed
-    time.sleep(random.uniform(0.025, 0.04))
-    fast_click_spot(clicking_areas["prayer_tag"])
-    time.sleep(random.uniform(0.03, 0.05))
-    fast_click_spot(clicking_areas["prot_item"])
-    time.sleep(random.uniform(0.015, 0.025))
-    fast_click_spot(clicking_areas["inventory_tag"])
+    # Switch to Prayer tab, wait for it to render, and enable Protect Item (only if not already active)
+    time.sleep(random.uniform(0.04, 0.06))
+    click_spot(clicking_areas["prayer_tag"])
+    time.sleep(random.uniform(0.08, 0.11))
+    activate_prayer("prot_item")
+    click_spot(clicking_areas["inventory_tag"])
     print(f"[Teleport] Emergency teleport + Protect Item triggered ({source})!")
 
 
@@ -632,7 +705,7 @@ def on_f12_press(e):
 SEARCH_AREA = (500, 300, 1000, 600)  # Adjust these coordinates as needed
 
 @timing_decorator
-def find_and_click_image(image_path,search_area):
+def find_and_click_image(image_path, search_area, fast=False):
     start_time = time.time()
     
     # Read the template image first so we can ensure search_area is at least as large as template
@@ -640,8 +713,9 @@ def find_and_click_image(image_path,search_area):
     template = cv2.imread(image_path, 0)
     if template is None:
         print(f"Template image not found or unreadable: {image_path}")
-        return
-    if ui_scale != 1.0:
+        return False
+    # Only rescale if not already using a freshly cropped anchor from ANCHORS_DIR
+    if ui_scale != 1.0 and not str(image_path).startswith(ANCHORS_DIR):
         th, tw = template.shape[:2]
         rw = max(4, int(round(tw * ui_scale)))
         rh = max(4, int(round(th * ui_scale)))
@@ -677,20 +751,27 @@ def find_and_click_image(image_path,search_area):
         # Get a weighted random point within the image area
         click_x, click_y = weighted_random_point_in_area(image_area)
 
-        # Move the mouse to the point (this initiates the hover)
-        pyautogui.moveTo(click_x, click_y)
-        
-        # Wait for 0.05 seconds
-        time.sleep(random.uniform(0.11, 0.125))
+        if fast:
+            pyautogui.moveTo(click_x, click_y, _pause=False)
+            pre_click_time = time.time()
+            pyautogui.click(click_x, click_y, _pause=False)
+        else:
+            # Move the mouse to the point (this initiates the hover)
+            pyautogui.moveTo(click_x, click_y)
+            
+            # Wait for 0.05 seconds
+            time.sleep(random.uniform(0.11, 0.125))
 
-        pre_click_time = time.time()
-        # Click on the weighted random point
-        pyautogui.click(click_x, click_y)
+            pre_click_time = time.time()
+            # Click on the weighted random point
+            pyautogui.click(click_x, click_y)
         
         end_time = time.time()
         print(f"Image found and clicked in {(end_time - start_time) * 1000:.2f} ms. max_val is {max_val}. start-before = {before_read_time-start_time} imageread= {after_read_time-before_read_time} matchtime {match_time -after_read_time} click time = {end_time-pre_click_time} end-after {end_time-after_read_time}")
+        return image_area
     else:
-        print(f"Image not found in the search area max value is {max_val}")
+        print(f"Image not found (or prayer already active) in the search area, max value is {max_val:.3f}")
+        return None
 
 def random_point_near(x, y, max_distance):
     if random.random() < 0.99:  # 75% chance of not shifting
