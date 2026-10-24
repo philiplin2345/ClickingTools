@@ -631,9 +631,19 @@ def get_inventory_slot_boxes():
 
 def is_slot_tagged_color(slot_bgr, style):
     """
-    Check if an inventory slot crop contains a RuneLite Inventory Tag outline or fill
-    for 'mage' (Blue/Cyan), 'range' (Green), or 'melee' (Red).
-    Works with Outline only (1-2px border) and/or Fill (at any opacity >= 25%).
+    Detect if an inventory slot is tagged with RuneLite Inventory Tags for:
+      - 'mage'  (Pure Blue #0000FF or Pure Cyan #00FFFF)
+      - 'range' (Pure Green #00FF00)
+      - 'melee' (Pure Red #FF0000)
+
+    Why this never false-positives on untagged items (like Blighted Ice/Veng Sacks or potions):
+    1. Every untagged OSRS item sprite is enclosed by a 1px pure-black silhouette border
+       (RGB <= 15) where the item meets the brown inventory background (~BGR 38, 48, 55).
+       RuneLite Inventory Tags replaces/tints that outer silhouette border with the tag color.
+       So we check ONLY the outer silhouette border pixels adjacent to the inventory background,
+       and reject any slot whose exterior silhouette border is still predominantly black.
+    2. We require strict channel separation (suppressing Green for pure Blue so slate-blue
+       Ice Sacks with G ~ 90-140 are ignored).
     """
     if slot_bgr is None or slot_bgr.size == 0:
         return False
@@ -642,25 +652,47 @@ def is_slot_tagged_color(slot_bgr, style):
     g = slot_bgr[:, :, 1].astype(np.int16)
     r = slot_bgr[:, :, 2].astype(np.int16)
 
+    # 1. Locate the uniform brown OSRS inventory stone background (~BGR 38, 48, 55)
+    bg_mask = (np.abs(b - 38) <= 14) & (np.abs(g - 48) <= 14) & (np.abs(r - 55) <= 14)
+    # Dilate background by 2px so `exterior_border` captures the 1-2px outer silhouette of the item
+    kernel = np.ones((5, 5), dtype=np.uint8)
+    near_bg = cv2.dilate(bg_mask.astype(np.uint8), kernel, iterations=1) > 0
+    exterior_border = near_bg & (~bg_mask)
+
+    # Untagged items have a pure-black (R<=18, G<=18, B<=18) outer border touching the background
+    black_border_pixels = int(np.count_nonzero(exterior_border & (r <= 18) & (g <= 18) & (b <= 18)))
+
     if style == "mage":
-        # Pure Blue (#0000FF), Sky/Dodger Blue (#0080FF), or Cyan (#00FFFF)
-        outline_mask = (b >= 170) & (r <= 65) & ((b - r) >= 120)
-        fill_mask = (b >= 105) & (r <= 55) & ((b - r) >= 65)
+        # Pure Blue (#0000FF): high B, BOTH R and G suppressed (excludes slate-blue Ice Sack where G ~ 90-140)
+        pure_blue = (b >= 195) & (r <= 45) & (g <= 50) & ((b - g) >= 145) & ((b - r) >= 150)
+        # Pure Cyan (#00FFFF): both B and G very high, R suppressed
+        pure_cyan = (b >= 210) & (g >= 210) & (r <= 35) & (np.abs(b - g) <= 25)
+        # Blended Blue Fill on the exterior border (when using Fill with Blue #0000FF)
+        fill_border = (b >= 115) & (r <= 45) & (g <= 45) & ((b - g) >= 75) & ((b - r) >= 75)
+        tag_mask = pure_blue | pure_cyan
     elif style == "range":
-        # Pure Green (#00FF00)
-        outline_mask = (g >= 170) & (r <= 65) & (b <= 65) & ((g - r) >= 120) & ((g - b) >= 120)
-        fill_mask = (g >= 105) & (r <= 55) & (b <= 55) & ((g - r) >= 65) & ((g - b) >= 65)
+        # Pure Green (#00FF00): high G, both R and B suppressed
+        tag_mask = (g >= 195) & (r <= 45) & (b <= 45) & ((g - r) >= 150) & ((g - b) >= 150)
+        fill_border = (g >= 115) & (r <= 45) & (b <= 45) & ((g - r) >= 75) & ((g - b) >= 75)
     elif style == "melee":
-        # Pure Red (#FF0000)
-        outline_mask = (r >= 170) & (g <= 65) & (b <= 65) & ((r - g) >= 120) & ((r - b) >= 120)
-        fill_mask = (r >= 105) & (g <= 55) & (b <= 55) & ((r - g) >= 65) & ((r - b) >= 65)
+        # Pure Red (#FF0000): high R, both G and B suppressed
+        tag_mask = (r >= 195) & (g <= 45) & (b <= 45) & ((r - g) >= 150) & ((r - b) >= 150)
+        fill_border = (r >= 115) & (g <= 45) & (b <= 45) & ((r - g) >= 75) & ((r - b) >= 75)
     else:
         return False
 
-    min_outline_pixels = max(6, int(round(10 * (ui_scale ** 2))))
-    if int(np.count_nonzero(outline_mask)) >= min_outline_pixels:
+    # Count tag pixels lying directly on the item's exterior border touching the background
+    border_tag_pixels = int(np.count_nonzero(exterior_border & (tag_mask | fill_border)))
+    total_tag_pixels = int(np.count_nonzero(tag_mask))
+
+    min_border_pixels = max(8, int(round(12 * ui_scale)))
+    # A tagged item's outer silhouette has colored border pixels exceeding any stray black border pixels
+    if border_tag_pixels >= min_border_pixels and border_tag_pixels > black_border_pixels:
         return True
-    return float(np.mean(fill_mask)) >= 0.18
+    # Fallback if item fills almost the entire slot: require strong pure neon tag count and no black border
+    if total_tag_pixels >= max(16, int(round(24 * (ui_scale ** 2)))) and black_border_pixels < min_border_pixels:
+        return True
+    return False
 
 
 @timing_decorator
@@ -689,7 +721,7 @@ def equip_tagged_gear(style):
             time.sleep(random.uniform(0.012, 0.022))
         fast_click_spot(click_box)
 
-    print(f"[Gear] Switched '{style}' gear ({len(matched_slots)} items clicked).")
+    print(f"[Gear] Switched '{style}' gear ({len(matched_slots)} items clicked: {[(r, c) for r, c, _ in matched_slots]}).")
     return len(matched_slots)
 
 
@@ -1163,4 +1195,6 @@ keyboard.on_press_key("esc", on_esc_press)
 print("Listening for F1-F9, Esc, F10 (refresh areas), and F11 (toggle PKer alarm auto-tele). Press Ctrl+C to exit.")
 
 # Keep the script running
+keyboard.wait()
+
 keyboard.wait()
