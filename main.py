@@ -31,6 +31,7 @@ BASELINE_CLICKING_AREAS = {
     "rigour": (1941, 1215, 1986, 1253),
     "augury": (1998, 1216, 2040, 1255),
     "piety": (1884, 1223, 1930, 1247),
+    "ice_barrage": (1910, 1240, 1944, 1277),
     "sgs": "images/sgs.png",
     "rock1": (1363, 721, 1469, 817),
     "rock2": (1039, 463, 1159, 546),
@@ -49,6 +50,11 @@ PRAYER_TEMPLATES = {
     "piety": "images/piety.png",
 }
 
+# Master spell icon templates used during F10 / startup calibration to lock in exact spell coordinates
+SPELL_TEMPLATES = {
+    "ice_barrage": "images/ice_barrage.png",
+}
+
 BASELINE_SEARCHING_AREAS = {
     "prayers": (1886, 1097, 2046, 1147),
     "prot_mage": (1886, 1099, 1929, 1145),
@@ -58,7 +64,10 @@ BASELINE_SEARCHING_AREAS = {
     "rigour": (1939, 1213, 1988, 1255),
     "augury": (1996, 1214, 2042, 1257),
     "piety": (1882, 1221, 1932, 1249),
+    "ice_barrage": (1906, 1236, 1948, 1281),
     "prayer_panel": (1820, 1035, 2055, 1265),
+    "magic_panel": (1820, 920, 2110, 1290),
+    "inventory_panel": (1842, 928, 2088, 1304),
     "inventory": (1835, 920, 2100, 1050),
     "alarm_patch": (1600, 920, 1640, 960)
 }
@@ -153,7 +162,7 @@ def save_areas_config():
         },
         "baseline_prayer_boxes": {
             k: list(BASELINE_CLICKING_AREAS[k])
-            for k in PRAYER_TEMPLATES
+            for k in list(PRAYER_TEMPLATES) + list(SPELL_TEMPLATES)
             if isinstance(BASELINE_CLICKING_AREAS.get(k), tuple)
         }
     }
@@ -174,15 +183,16 @@ def load_areas_config():
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
         ui_scale = float(data.get("ui_scale", 1.0))
+        icon_keys = set(PRAYER_TEMPLATES) | set(SPELL_TEMPLATES)
         for k, v in data.get("clicking_areas", {}).items():
-            # Ensure prayer keys are always coordinate tuples even if loading an older config
-            if k in PRAYER_TEMPLATES and not isinstance(v, (list, tuple)):
+            # Ensure prayer/spell keys are always coordinate tuples even if loading an older config
+            if k in icon_keys and not isinstance(v, (list, tuple)):
                 continue
             clicking_areas[k] = tuple(v) if isinstance(v, list) else v
         for k, v in data.get("searching_areas", {}).items():
             searching_areas[k] = tuple(v) if isinstance(v, list) else v
         for k, v in data.get("baseline_prayer_boxes", {}).items():
-            if k in PRAYER_TEMPLATES and isinstance(v, list) and len(v) == 4:
+            if k in icon_keys and isinstance(v, list) and len(v) == 4:
                 BASELINE_CLICKING_AREAS[k] = tuple(v)
         print(f"[Config] Loaded calibrated areas from '{CONFIG_FILE}' (scale={ui_scale:.3f}).")
         return True
@@ -295,8 +305,8 @@ def refresh_areas(open_prayer_tab=False):
     """
     Scan the full screen for reference icons (prayers or saved tab anchors),
     derive all clicking_areas and searching_areas using relative offsets,
-    lock in constant (x1, y1, x2, y2) coordinates for all prayer icons,
-    crop updated anchor/prayer templates, and persist them to CONFIG_FILE.
+    lock in constant (x1, y1, x2, y2) coordinates for all prayer & spell icons,
+    crop updated anchor/prayer/spell templates, and persist them to CONFIG_FILE.
     """
     global clicking_areas, searching_areas, ui_scale
 
@@ -361,7 +371,7 @@ def refresh_areas(open_prayer_tab=False):
             searching_areas[key] = _derive_box(base_val, origin_x, origin_y, ui_scale, screen_w, screen_h)
 
     os.makedirs(ANCHORS_DIR, exist_ok=True)
-    opened_prayer_temporarily = False
+    opened_tab_temporarily = False
     missing_prayer_anchors = any(
         not os.path.exists(os.path.join(ANCHORS_DIR, f"{pk}.png")) for pk in PRAYER_TEMPLATES
     )
@@ -380,7 +390,7 @@ def refresh_areas(open_prayer_tab=False):
         screenshot_pil = pyautogui.screenshot()
         screen_bgr = cv2.cvtColor(np.array(screenshot_pil), cv2.COLOR_RGB2BGR)
         screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
-        opened_prayer_temporarily = True
+        opened_tab_temporarily = True
 
     # Scan the Prayer panel for all prayers in PRAYER_TEMPLATES to lock in their exact coordinates
     px1, py1, px2, py2 = searching_areas.get("prayer_panel", (1820, 1035, 2055, 1265))
@@ -449,6 +459,60 @@ def refresh_areas(open_prayer_tab=False):
             if crop.size > 0:
                 cv2.imwrite(prayer_tag_path, crop)
 
+    # Calibrate spells in SPELL_TEMPLATES (e.g. ice_barrage) during F10 or if magic tab is open
+    missing_spell_anchors = any(
+        os.path.exists(master_path) and not os.path.exists(os.path.join(ANCHORS_DIR, f"{sk}.png"))
+        for sk, master_path in SPELL_TEMPLATES.items()
+    )
+    if open_prayer_tab or missing_spell_anchors:
+        print("  -> Opening Magic tab briefly to calibrate exact spell icon positions...")
+        fast_click_spot(clicking_areas["magic_tag"])
+        time.sleep(0.12)
+        screenshot_pil = pyautogui.screenshot()
+        screen_bgr = cv2.cvtColor(np.array(screenshot_pil), cv2.COLOR_RGB2BGR)
+        screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
+        opened_tab_temporarily = True
+
+    mx1, my1, mx2, my2 = searching_areas.get("magic_panel", (1820, 920, 2110, 1290))
+    mpanel_gray = screen_gray[my1:my2, mx1:mx2]
+    mpanel_bgr = screen_bgr[my1:my2, mx1:mx2]
+    if mpanel_gray.size > 0:
+        for spell_key, master_path in SPELL_TEMPLATES.items():
+            if not os.path.exists(master_path):
+                continue
+            stmpl = cv2.imread(master_path, 0)
+            if stmpl is None:
+                continue
+            smatch = match_template_multiscale(
+                mpanel_gray, stmpl, scales=[ui_scale, 1.0], threshold=0.76
+            )
+            if smatch is not None:
+                sval, sloc, _, (sw_icon, sh_icon) = smatch
+                abs_x1 = mx1 + sloc[0]
+                abs_y1 = my1 + sloc[1]
+                abs_x2 = min(screen_w - 1, abs_x1 + sw_icon)
+                abs_y2 = min(screen_h - 1, abs_y1 + sh_icon)
+
+                clicking_areas[spell_key] = (abs_x1, abs_y1, abs_x2, abs_y2)
+                ox, oy = BASELINE_ORIGIN
+                BASELINE_CLICKING_AREAS[spell_key] = (
+                    int(round(ox + (abs_x1 - origin_x) / ui_scale)),
+                    int(round(oy + (abs_y1 - origin_y) / ui_scale)),
+                    int(round(ox + (abs_x2 - origin_x) / ui_scale)),
+                    int(round(oy + (abs_y2 - origin_y) / ui_scale)),
+                )
+                pad = max(2, int(round(2 * ui_scale)))
+                searching_areas[spell_key] = (
+                    max(0, abs_x1 - pad),
+                    max(0, abs_y1 - pad),
+                    min(screen_w - 1, abs_x2 + pad),
+                    min(screen_h - 1, abs_y2 + pad),
+                )
+                spell_crop = mpanel_bgr[sloc[1]:sloc[1] + sh_icon, sloc[0]:sloc[0] + sw_icon]
+                if spell_crop.size > 0 and sval >= 0.80:
+                    cv2.imwrite(os.path.join(ANCHORS_DIR, f"{spell_key}.png"), auto_trim_crop(spell_crop, margin=1))
+                print(f"  -> Calibrated spell '{spell_key}' box={clicking_areas[spell_key]} (conf={sval:.3f})")
+
     # Check if optional orb templates exist for quick_prayers / spec (handles arbitrary window height)
     for orb_key in ("quick_prayers", "spec"):
         orb_path = os.path.join(ANCHORS_DIR, f"{orb_key}.png")
@@ -462,7 +526,7 @@ def refresh_areas(open_prayer_tab=False):
                     _, oloc, _, (ow, oh) = orb_match
                     clicking_areas[orb_key] = (oloc[0], oloc[1], oloc[0] + ow, oloc[1] + oh)
 
-    if opened_prayer_temporarily:
+    if opened_tab_temporarily:
         fast_click_spot(clicking_areas["inventory_tag"])
 
     _template_cache.clear()
@@ -522,6 +586,188 @@ def click_spots(areas):
         spot = weighted_random_point_in_area(area)
         pyautogui.click(spot[0], spot[1])
         time.sleep(random.uniform(0.1, 0.5))
+
+
+def get_inventory_slot_boxes():
+    """
+    Compute all 28 OSRS inventory slot bounding boxes (7 rows x 4 columns)
+    anchored from clicking_areas['last_inventory_spot'] (which is row=6, col=3).
+    Returns a list of (row, col, detect_box, click_box).
+    """
+    lx1, ly1, lx2, ly2 = clicking_areas["last_inventory_spot"]
+    col3_cx = (lx1 + lx2) / 2.0
+    row6_cy = (ly1 + ly2) / 2.0
+
+    # At 1.0x baseline scale (360px wide side panel), slot pitch is 63px horizontal x 54px vertical
+    step_x = 63.0 * ui_scale
+    step_y = 54.0 * ui_scale
+    detect_hw = max(12, int(round(22 * ui_scale)))
+    detect_hh = max(10, int(round(20 * ui_scale)))
+    click_hw = max(6, int(round(12 * ui_scale)))
+    click_hh = max(6, int(round(11 * ui_scale)))
+
+    slots = []
+    for row in range(7):
+        # Zig-zag column order on odd rows minimizes mouse travel distance across multi-way switches
+        cols = range(4) if (row % 2 == 0) else range(3, -1, -1)
+        for col in cols:
+            cx = int(round(col3_cx - (3 - col) * step_x))
+            cy = int(round(row6_cy - (6 - row) * step_y))
+            detect_box = (
+                max(0, cx - detect_hw),
+                max(0, cy - detect_hh),
+                cx + detect_hw,
+                cy + detect_hh,
+            )
+            click_box = (
+                max(0, cx - click_hw),
+                max(0, cy - click_hh),
+                cx + click_hw,
+                cy + click_hh,
+            )
+            slots.append((row, col, detect_box, click_box))
+    return slots
+
+
+def is_slot_tagged_color(slot_bgr, style):
+    """
+    Check if an inventory slot crop contains a RuneLite Inventory Tag outline or fill
+    for 'mage' (Blue/Cyan), 'range' (Green), or 'melee' (Red).
+    Works with Outline only (1-2px border) and/or Fill (at any opacity >= 25%).
+    """
+    if slot_bgr is None or slot_bgr.size == 0:
+        return False
+
+    b = slot_bgr[:, :, 0].astype(np.int16)
+    g = slot_bgr[:, :, 1].astype(np.int16)
+    r = slot_bgr[:, :, 2].astype(np.int16)
+
+    if style == "mage":
+        # Pure Blue (#0000FF), Sky/Dodger Blue (#0080FF), or Cyan (#00FFFF)
+        outline_mask = (b >= 170) & (r <= 65) & ((b - r) >= 120)
+        fill_mask = (b >= 105) & (r <= 55) & ((b - r) >= 65)
+    elif style == "range":
+        # Pure Green (#00FF00)
+        outline_mask = (g >= 170) & (r <= 65) & (b <= 65) & ((g - r) >= 120) & ((g - b) >= 120)
+        fill_mask = (g >= 105) & (r <= 55) & (b <= 55) & ((g - r) >= 65) & ((g - b) >= 65)
+    elif style == "melee":
+        # Pure Red (#FF0000)
+        outline_mask = (r >= 170) & (g <= 65) & (b <= 65) & ((r - g) >= 120) & ((r - b) >= 120)
+        fill_mask = (r >= 105) & (g <= 55) & (b <= 55) & ((r - g) >= 65) & ((r - b) >= 65)
+    else:
+        return False
+
+    min_outline_pixels = max(6, int(round(10 * (ui_scale ** 2))))
+    if int(np.count_nonzero(outline_mask)) >= min_outline_pixels:
+        return True
+    return float(np.mean(fill_mask)) >= 0.18
+
+
+@timing_decorator
+def equip_tagged_gear(style):
+    """
+    Take a SINGLE screenshot of the 28-slot inventory grid, find all slots tagged with
+    the requested style ('mage' = blue/cyan, 'range' = green, 'melee' = red), and click them rapidly.
+    """
+    slots = get_inventory_slot_boxes()
+    ux1 = min(s[2][0] for s in slots)
+    uy1 = min(s[2][1] for s in slots)
+    ux2 = max(s[2][2] for s in slots)
+    uy2 = max(s[2][3] for s in slots)
+
+    shot = pyautogui.screenshot(region=(ux1, uy1, ux2 - ux1, uy2 - uy1))
+    inv_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
+
+    matched_slots = []
+    for row, col, (dx1, dy1, dx2, dy2), click_box in slots:
+        slot_bgr = inv_bgr[dy1 - uy1:dy2 - uy1, dx1 - ux1:dx2 - ux1]
+        if is_slot_tagged_color(slot_bgr, style):
+            matched_slots.append((row, col, click_box))
+
+    for idx, (row, col, click_box) in enumerate(matched_slots):
+        if idx > 0:
+            time.sleep(random.uniform(0.012, 0.022))
+        fast_click_spot(click_box)
+
+    print(f"[Gear] Switched '{style}' gear ({len(matched_slots)} items clicked).")
+    return len(matched_slots)
+
+
+def select_spell(spell_key="ice_barrage"):
+    """Click a calibrated spell slot (such as 'ice_barrage') on the Magic tab."""
+    box = clicking_areas.get(spell_key)
+    if isinstance(box, tuple) and len(box) == 4:
+        fast_click_spot(box)
+        print(f"[Magic] Selected spell '{spell_key}' at {box}.")
+    elif spell_key in SPELL_TEMPLATES:
+        find_and_click_image(SPELL_TEMPLATES[spell_key], searching_areas.get("magic_panel", searching_areas["inventory"]), fast=True)
+
+
+@timing_decorator
+def on_f1_press(e):
+    """F1: Swap to Mage gear (Blue/Cyan tag), activate Augury, select Ice Barrage, and restore cursor."""
+    if e.event_type == keyboard.KEY_DOWN:
+        orig_x, orig_y = pyautogui.position()
+
+        # 1. Open Inventory and equip Mage gear
+        fast_click_spot(clicking_areas["inventory_tag"])
+        time.sleep(random.uniform(0.055, 0.07))
+        equip_tagged_gear("mage")
+
+        # 2. Open Prayer tab and activate Augury (if not already active)
+        fast_click_spot(clicking_areas["prayer_tag"])
+        time.sleep(random.uniform(0.065, 0.08))
+        activate_prayers("augury")
+
+        # 3. Open Magic tab and select Ice Barrage
+        fast_click_spot(clicking_areas["magic_tag"])
+        time.sleep(random.uniform(0.055, 0.07))
+        select_spell("ice_barrage")
+
+        # 4. Return cursor to its original position so user can immediately click target
+        pyautogui.moveTo(orig_x, orig_y, _pause=False)
+
+
+@timing_decorator
+def on_f2_press(e):
+    """F2: Swap to Range gear (Green tag), activate Rigour, return to Inventory tab, and restore cursor."""
+    if e.event_type == keyboard.KEY_DOWN:
+        orig_x, orig_y = pyautogui.position()
+
+        # 1. Open Inventory and equip Range gear
+        fast_click_spot(clicking_areas["inventory_tag"])
+        time.sleep(random.uniform(0.055, 0.07))
+        equip_tagged_gear("range")
+
+        # 2. Open Prayer tab and activate Rigour (if not already active)
+        fast_click_spot(clicking_areas["prayer_tag"])
+        time.sleep(random.uniform(0.065, 0.08))
+        activate_prayers("rigour")
+
+        # 3. Return to Inventory tab and restore cursor to original position
+        fast_click_spot(clicking_areas["inventory_tag"])
+        pyautogui.moveTo(orig_x, orig_y, _pause=False)
+
+
+@timing_decorator
+def on_f3_press(e):
+    """F3: Swap to Melee gear (Red tag), activate Piety, return to Inventory tab, and restore cursor."""
+    if e.event_type == keyboard.KEY_DOWN:
+        orig_x, orig_y = pyautogui.position()
+
+        # 1. Open Inventory and equip Melee gear
+        fast_click_spot(clicking_areas["inventory_tag"])
+        time.sleep(random.uniform(0.055, 0.07))
+        equip_tagged_gear("melee")
+
+        # 2. Open Prayer tab and activate Piety (if not already active)
+        fast_click_spot(clicking_areas["prayer_tag"])
+        time.sleep(random.uniform(0.065, 0.08))
+        activate_prayers("piety")
+
+        # 3. Return to Inventory tab and restore cursor to original position
+        fast_click_spot(clicking_areas["inventory_tag"])
+        pyautogui.moveTo(orig_x, orig_y, _pause=False)
 
 
 @timing_decorator
@@ -900,7 +1146,10 @@ def toggle_clicking(e):
 load_areas_config()
 refresh_areas()
 
-# Set up the listeners for F4-F10 and Esc keys
+# Set up the listeners for F1-F11 and Esc keys
+keyboard.on_press_key("f1", on_f1_press)
+keyboard.on_press_key("f2", on_f2_press)
+keyboard.on_press_key("f3", on_f3_press)
 keyboard.on_press_key("f4", on_f4_press)
 keyboard.on_press_key("f5", on_f5_press)
 keyboard.on_press_key("f6", on_f6_press)
@@ -911,9 +1160,7 @@ keyboard.on_press_key("f10", on_f10_press)
 keyboard.on_press_key("f11", toggle_alarm_watcher)
 keyboard.on_press_key("esc", on_esc_press)
 # keyboard.on_press_key("f12", on_f12_press)
-print("Listening for F4-F9, Esc, F10 (refresh areas), and F11 (toggle PKer alarm auto-tele). Press Ctrl+C to exit.")
+print("Listening for F1-F9, Esc, F10 (refresh areas), and F11 (toggle PKer alarm auto-tele). Press Ctrl+C to exit.")
 
 # Keep the script running
-keyboard.wait()
-
 keyboard.wait()
