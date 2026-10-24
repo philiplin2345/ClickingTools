@@ -29,6 +29,7 @@ BASELINE_CLICKING_AREAS = {
     "prot_melee": (2008, 1101, 2054, 1147),
     "prot_item": (1820, 1040, 1881, 1091),
     "rigour": (1943, 1213, 1992, 1264),
+    "augury": (2003, 1213, 2045, 1252),
     "piety": (2068, 1157, 2114, 1181),
     "sgs": "images/sgs.png",
     "rock1": (1363, 721, 1469, 817),
@@ -44,12 +45,14 @@ PRAYER_TEMPLATES = {
     "prot_melee": "images/protect_from_melee.png",
     "prot_item": "images/protect_item.png",
     "rigour": "images/rigour.png",
+    "augury": "images/augury.png",
     "piety": "images/piety.png",
 }
 
 BASELINE_SEARCHING_AREAS = {
     "prayers": (1875, 1090, 2068, 1165),
     "rigour": (1925, 1195, 2018, 1280),
+    "augury": (1795, 910, 2135, 1320),
     "piety": (1795, 910, 2135, 1320),
     "prot_item": (1795, 910, 2135, 1320),
     "prayer_panel": (1795, 910, 2135, 1320),
@@ -559,7 +562,7 @@ def on_f5_press(e):
         time.sleep(random.uniform(0.05, 0.08))
         activate_prayer("prot_mage")
         time.sleep(random.uniform(0.05, 0.08))
-        activate_prayer("rigour")
+        activate_prayer("augury")
         click_spot(clicking_areas["inventory_tag"])
 
 
