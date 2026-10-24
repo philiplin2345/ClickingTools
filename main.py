@@ -27,6 +27,7 @@ BASELINE_CLICKING_AREAS = {
     "prot_mage": "images/protect_from_mage.png",
     "prot_range": "images/protect_from_range.png",
     "prot_melee": "images/protect_from_melee.png",
+    "prot_item": "images/protect_item.png",
     "rigour": "images/rigour.png",
     "sgs": "images/sgs.png",
     "rock1": (1363, 721, 1469, 817),
@@ -38,6 +39,7 @@ BASELINE_CLICKING_AREAS = {
 BASELINE_SEARCHING_AREAS = {
     "prayers": (1875, 1090, 2068, 1165),
     "rigour": (1925, 1195, 2018, 1280),
+    "prot_item": (1835, 920, 2115, 1300),
     "inventory": (1835, 920, 2100, 1050),
     "alarm_patch": (1600, 920, 1640, 960)
 }
@@ -300,24 +302,25 @@ def refresh_areas():
             min(screen_h - 1, py2),
         )
 
-    # Also locate rigour directly if visible on screen so searching_areas["rigour"] is exact
-    rigour_path = clicking_areas.get("rigour", "images/rigour.png")
-    if isinstance(rigour_path, str) and os.path.exists(rigour_path):
-        rigour_tmpl = cv2.imread(rigour_path, 0)
-        if rigour_tmpl is not None:
-            rigour_match = match_template_multiscale(
-                screen_gray, rigour_tmpl, scales=[ui_scale, 1.0], threshold=0.78
-            )
-            if rigour_match is not None:
-                rval, rloc, _, (rw, rh) = rigour_match
-                pad = max(15, int(18 * ui_scale))
-                searching_areas["rigour"] = (
-                    max(0, rloc[0] - pad),
-                    max(0, rloc[1] - pad),
-                    min(screen_w - 1, rloc[0] + rw + pad),
-                    min(screen_h - 1, rloc[1] + rh + pad),
+    # Also locate rigour and prot_item directly if visible on screen so their searching_areas are exact
+    for extra_prayer, default_path in (("rigour", "images/rigour.png"), ("prot_item", "images/protect_item.png")):
+        prayer_path = clicking_areas.get(extra_prayer, default_path)
+        if isinstance(prayer_path, str) and os.path.exists(prayer_path):
+            prayer_tmpl = cv2.imread(prayer_path, 0)
+            if prayer_tmpl is not None:
+                prayer_match = match_template_multiscale(
+                    screen_gray, prayer_tmpl, scales=[ui_scale, 1.0], threshold=0.78
                 )
-                print(f"  -> Matched 'rigour' at {rloc} (confidence={rval:.3f})")
+                if prayer_match is not None:
+                    pval, ploc, _, (pw, ph) = prayer_match
+                    pad = max(15, int(18 * ui_scale))
+                    searching_areas[extra_prayer] = (
+                        max(0, ploc[0] - pad),
+                        max(0, ploc[1] - pad),
+                        min(screen_w - 1, ploc[0] + pw + pad),
+                        min(screen_h - 1, ploc[1] + ph + pad),
+                    )
+                    print(f"  -> Matched '{extra_prayer}' at {ploc} (confidence={pval:.3f})")
 
     # Check if optional orb templates exist for quick_prayers / spec (handles arbitrary window height)
     for orb_key in ("quick_prayers", "spec"):
@@ -460,13 +463,20 @@ def fast_click_spot(area):
 
 @timing_decorator
 def emergency_teleport(source="manual"):
-    """Interrupt any ongoing clicking and immediately click inventory tab + teleport item."""
+    """Interrupt any ongoing clicking, click inventory tab + teleport item, then enable Protect Item prayer."""
     global clicking
     clicking = False
     fast_click_spot(clicking_areas["inventory_tag"])
     time.sleep(random.uniform(0.015, 0.025))
     fast_click_spot(clicking_areas["last_inventory_spot"])
-    print(f"[Teleport] Emergency teleport triggered ({source})!")
+
+    # Immediately switch to Prayer tab and click Protect Item in case teleblock landed
+    time.sleep(random.uniform(0.03, 0.05))
+    fast_click_spot(clicking_areas["prayer_tag"])
+    time.sleep(random.uniform(0.06, 0.09))
+    find_and_click_image(clicking_areas["prot_item"], searching_areas["prot_item"])
+    fast_click_spot(clicking_areas["inventory_tag"])
+    print(f"[Teleport] Emergency teleport + Protect Item triggered ({source})!")
 
 
 def on_esc_press(e):
