@@ -38,7 +38,8 @@ BASELINE_CLICKING_AREAS = {
 BASELINE_SEARCHING_AREAS = {
     "prayers": (1875, 1090, 2068, 1165),
     "rigour": (1925, 1195, 2018, 1280),
-    "inventory": (1835, 920, 2100, 1050)
+    "inventory": (1835, 920, 2100, 1050),
+    "alarm_patch": (1600, 920, 1640, 960)
 }
 
 # Reference templates and their top-left offset (dx, dy) from BASELINE_ORIGIN at 1.0x scale
@@ -82,6 +83,12 @@ click_count = 0
 initial_point = None
 click_thread = None
 progress_bar = None
+
+# Wilderness Player Alarm watcher state (toggled by F11)
+alarm_watching = False
+alarm_thread = None
+ALARM_POLL_INTERVAL = 0.025  # 25ms (~40 Hz, ~24 checks per OSRS tick)
+ALARM_COOLDOWN = 4.0         # Seconds to pause/disarm after triggering teleport
 
 
 def timing_decorator(func):
@@ -444,10 +451,92 @@ def on_f8_press(e):
         time.sleep(random.uniform(0.7, 0.8))
         click_spot(clicking_areas["spec"])
     
+def fast_click_spot(area):
+    """Click a spot immediately bypassing pyautogui's global 50ms pause per action."""
+    spot = weighted_random_point_in_area(area)
+    pyautogui.moveTo(spot[0], spot[1], _pause=False)
+    pyautogui.click(spot[0], spot[1], _pause=False)
+
+
+@timing_decorator
+def emergency_teleport(source="manual"):
+    """Interrupt any ongoing clicking and immediately click inventory tab + teleport item."""
+    global clicking
+    clicking = False
+    fast_click_spot(clicking_areas["inventory_tag"])
+    time.sleep(random.uniform(0.015, 0.025))
+    fast_click_spot(clicking_areas["last_inventory_spot"])
+    print(f"[Teleport] Emergency teleport triggered ({source})!")
+
+
 def on_esc_press(e):
     if e.event_type == keyboard.KEY_DOWN:
-        click_spot(clicking_areas["inventory_tag"])
-        click_spot(clicking_areas["last_inventory_spot"])
+        emergency_teleport(source="Esc key")
+
+
+def is_alarm_flash_detected(patch_bgr):
+    """
+    Detect RuneLite Wilderness Player Alarm screen flash in a sampled BGR viewport patch.
+    Designed for Magenta (#FF00FF) flash at >=35% opacity (recommended: 50%-75% opacity),
+    and also supports solid high-opacity Red (#FF0000 at >=70% opacity).
+    """
+    b = patch_bgr[:, :, 0].astype(np.int16)
+    g = patch_bgr[:, :, 1].astype(np.int16)
+    r = patch_bgr[:, :, 2].astype(np.int16)
+
+    # 1. Magenta (#FF00FF) flash check: high R and B, suppressed G (works down to ~35% opacity)
+    magenta_mask = (r >= 95) & (b >= 95) & ((r - g) >= 65) & ((b - g) >= 65)
+    if np.mean(magenta_mask) >= 0.70:
+        return True
+
+    # 2. Pure Red (#FF0000) flash fallback: very high R, very low G and B across entire patch
+    red_mask = (r >= 175) & (g <= 55) & (b <= 55) & ((r - g) >= 130)
+    if np.mean(red_mask) >= 0.85:
+        return True
+
+    return False
+
+
+def alarm_watcher_loop():
+    """Background loop that polls searching_areas['alarm_patch'] for the alarm flash."""
+    global alarm_watching
+    while alarm_watching:
+        try:
+            x1, y1, x2, y2 = searching_areas.get("alarm_patch", (1600, 920, 1640, 960))
+            w = max(8, x2 - x1)
+            h = max(8, y2 - y1)
+            shot = pyautogui.screenshot(region=(x1, y1, w, h))
+            patch_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
+
+            if is_alarm_flash_detected(patch_bgr):
+                emergency_teleport(source="Wilderness Player Alarm")
+                alarm_watching = False
+                print(
+                    "[Alarm] Auto-teleport triggered and DISARMED to prevent extra clicks. "
+                    "Press F11 when ready to re-arm."
+                )
+                break
+        except Exception as exc:
+            print(f"[Alarm] Watcher error: {exc}")
+
+        time.sleep(ALARM_POLL_INTERVAL)
+
+
+def toggle_alarm_watcher(e):
+    """Toggle the Wilderness Player Alarm auto-teleport watcher on F11 press."""
+    global alarm_watching, alarm_thread
+    if e.event_type == keyboard.KEY_DOWN:
+        if not alarm_watching:
+            alarm_watching = True
+            alarm_thread = threading.Thread(target=alarm_watcher_loop, daemon=True)
+            alarm_thread.start()
+            print(
+                f"[Alarm] Auto-teleport ARMED (monitoring patch {searching_areas.get('alarm_patch')}). "
+                "Press F11 to disarm."
+            )
+        else:
+            alarm_watching = False
+            print("[Alarm] Auto-teleport DISARMED.")
 
 def on_f12_press(e):
     if e.event_type == keyboard.KEY_DOWN:
@@ -604,9 +693,10 @@ keyboard.on_press_key("f7", on_f7_press)
 keyboard.on_press_key("f8", on_f8_press)
 keyboard.on_press_key("f9", toggle_clicking)
 keyboard.on_press_key("f10", on_f10_press)
+keyboard.on_press_key("f11", toggle_alarm_watcher)
 keyboard.on_press_key("esc", on_esc_press)
 # keyboard.on_press_key("f12", on_f12_press)
-print("Listening for F4-F9, Esc, and F10 (refresh areas) key presses. Press Ctrl+C to exit.")
+print("Listening for F4-F9, Esc, F10 (refresh areas), and F11 (toggle PKer alarm auto-tele). Press Ctrl+C to exit.")
 
 # Keep the script running
 keyboard.wait()
