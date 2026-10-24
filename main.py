@@ -55,6 +55,12 @@ SPELL_TEMPLATES = {
     "ice_barrage": "images/ice_barrage.png",
 }
 
+# Special Attack minimap orb templates (unactive vs active state)
+SPEC_ORB_TEMPLATES = {
+    "unactive": "images/spec_orb_unactive.png",
+    "active": "images/spec_orb_active.png",
+}
+
 BASELINE_SEARCHING_AREAS = {
     "prayers": (1886, 1097, 2046, 1147),
     "prot_mage": (1886, 1099, 1929, 1145),
@@ -65,6 +71,7 @@ BASELINE_SEARCHING_AREAS = {
     "augury": (1996, 1214, 2042, 1257),
     "piety": (1882, 1221, 1932, 1249),
     "ice_barrage": (1906, 1236, 1948, 1281),
+    "spec": (1918, 238, 1966, 286),
     "prayer_panel": (1820, 1035, 2055, 1265),
     "magic_panel": (1820, 920, 2110, 1290),
     "inventory_panel": (1842, 928, 2088, 1304),
@@ -260,16 +267,17 @@ def _derive_box(base_box, origin_x, origin_y, scale, screen_w, screen_h):
     return (x1, y1, x2, y2)
 
 
-# In-memory grayscale template cache: (path, ui_scale) -> np.ndarray
+# In-memory template cache: (path, ui_scale, color_mode) -> np.ndarray
 _template_cache = {}
 
 
-def get_cached_template(image_path):
-    """Load and cache grayscale template image in memory so keypresses don't hit disk."""
-    key = (image_path, ui_scale)
+def get_cached_template(image_path, color=False):
+    """Load and cache grayscale (or BGR color) template image in memory so keypresses don't hit disk."""
+    key = (image_path, ui_scale, bool(color))
     if key in _template_cache:
         return _template_cache[key]
-    template = cv2.imread(image_path, 0)
+    flag = cv2.IMREAD_COLOR if color else cv2.IMREAD_GRAYSCALE
+    template = cv2.imread(image_path, flag)
     if template is None:
         return None
     if ui_scale != 1.0 and not str(image_path).startswith(ANCHORS_DIR):
@@ -298,6 +306,61 @@ def auto_trim_crop(crop_bgr, margin=1):
     x2 = min(w, int(xs.max()) + 1 + margin)
     y2 = min(h, int(ys.max()) + 1 + margin)
     return crop_bgr[y1:y2, x1:x2]
+
+
+def _calibrate_spec_orb_from_screen(screen_gray, origin_x, origin_y, screen_w, screen_h):
+    """
+    Scan the minimap region above the side panel for spec_orb_unactive.png or spec_orb_active.png.
+    Since the spec orb is attached to the top-right minimap (not the bottom-right side panel),
+    scanning the vertical column above the side panel finds its exact position at any window height.
+    """
+    sx1 = max(0, int(round(origin_x - 160 * ui_scale)))
+    sx2 = min(screen_w, int(round(origin_x + 300 * ui_scale)))
+    sy1 = 0
+    sy2 = max(120, min(screen_h, int(round(origin_y - 80 * ui_scale))))
+
+    strip_gray = screen_gray[sy1:sy2, sx1:sx2]
+    if strip_gray.size == 0:
+        return False
+
+    best_match = None
+    for state_key, orb_path in SPEC_ORB_TEMPLATES.items():
+        if not os.path.exists(orb_path):
+            continue
+        orb_tmpl = cv2.imread(orb_path, 0)
+        if orb_tmpl is None:
+            continue
+        m = match_template_multiscale(strip_gray, orb_tmpl, scales=[ui_scale, 1.0], threshold=0.76)
+        if m is not None and (best_match is None or m[0] > best_match[0]):
+            best_match = (*m, state_key)
+
+    if best_match is None:
+        return False
+
+    oval, oloc, _, (ow, oh), state_key = best_match
+    abs_x1 = sx1 + oloc[0]
+    abs_y1 = sy1 + oloc[1]
+    abs_x2 = min(screen_w - 1, abs_x1 + ow)
+    abs_y2 = min(screen_h - 1, abs_y1 + oh)
+
+    # Inset click box slightly (+4px) so random clicks always land inside the circular orb
+    inset_x = max(2, int(round(4 * ui_scale)))
+    inset_y = max(2, int(round(4 * ui_scale)))
+    clicking_areas["spec"] = (
+        abs_x1 + inset_x,
+        abs_y1 + inset_y,
+        max(abs_x1 + inset_x + 2, abs_x2 - inset_x),
+        max(abs_y1 + inset_y + 2, abs_y2 - inset_y),
+    )
+    pad = max(3, int(round(4 * ui_scale)))
+    searching_areas["spec"] = (
+        max(0, abs_x1 - pad),
+        max(0, abs_y1 - pad),
+        min(screen_w - 1, abs_x2 + pad),
+        min(screen_h - 1, abs_y2 + pad),
+    )
+    print(f"  -> Calibrated minimap 'spec' orb ({state_key}) click={clicking_areas['spec']} search={searching_areas['spec']} (conf={oval:.3f})")
+    return True
 
 
 @timing_decorator
@@ -513,18 +576,20 @@ def refresh_areas(open_prayer_tab=False):
                     cv2.imwrite(os.path.join(ANCHORS_DIR, f"{spell_key}.png"), auto_trim_crop(spell_crop, margin=1))
                 print(f"  -> Calibrated spell '{spell_key}' box={clicking_areas[spell_key]} (conf={sval:.3f})")
 
-    # Check if optional orb templates exist for quick_prayers / spec (handles arbitrary window height)
-    for orb_key in ("quick_prayers", "spec"):
-        orb_path = os.path.join(ANCHORS_DIR, f"{orb_key}.png")
-        if os.path.exists(orb_path):
-            orb_tmpl = cv2.imread(orb_path, 0)
-            if orb_tmpl is not None:
-                orb_match = match_template_multiscale(
-                    screen_gray, orb_tmpl, scales=[ui_scale, 1.0], threshold=0.80
-                )
-                if orb_match is not None:
-                    _, oloc, _, (ow, oh) = orb_match
-                    clicking_areas[orb_key] = (oloc[0], oloc[1], oloc[0] + ow, oloc[1] + oh)
+    # Calibrate minimap Special Attack orb position (handles any window height since it's attached to minimap)
+    _calibrate_spec_orb_from_screen(screen_gray, origin_x, origin_y, screen_w, screen_h)
+
+    # Check if optional orb template exists for quick_prayers
+    qp_path = os.path.join(ANCHORS_DIR, "quick_prayers.png")
+    if os.path.exists(qp_path):
+        qp_tmpl = cv2.imread(qp_path, 0)
+        if qp_tmpl is not None:
+            qp_match = match_template_multiscale(
+                screen_gray, qp_tmpl, scales=[ui_scale, 1.0], threshold=0.80
+            )
+            if qp_match is not None:
+                _, oloc, _, (ow, oh) = qp_match
+                clicking_areas["quick_prayers"] = (oloc[0], oloc[1], oloc[0] + ow, oloc[1] + oh)
 
     if opened_tab_temporarily:
         fast_click_spot(clicking_areas["inventory_tag"])
@@ -588,10 +653,12 @@ def click_spots(areas):
         time.sleep(random.uniform(0.1, 0.5))
 
 
-def get_inventory_slot_boxes():
+def get_inventory_slot_boxes(zigzag=True):
     """
     Compute all 28 OSRS inventory slot bounding boxes (7 rows x 4 columns)
     anchored from clicking_areas['last_inventory_spot'] (which is row=6, col=3).
+    If zigzag=True, odd rows scan right-to-left for shorter mouse travel;
+    if zigzag=False, all rows scan strictly top->bottom, left->right.
     Returns a list of (row, col, detect_box, click_box).
     """
     lx1, ly1, lx2, ly2 = clicking_areas["last_inventory_spot"]
@@ -608,8 +675,7 @@ def get_inventory_slot_boxes():
 
     slots = []
     for row in range(7):
-        # Zig-zag column order on odd rows minimizes mouse travel distance across multi-way switches
-        cols = range(4) if (row % 2 == 0) else range(3, -1, -1)
+        cols = (range(4) if (row % 2 == 0) else range(3, -1, -1)) if zigzag else range(4)
         for col in cols:
             cx = int(round(col3_cx - (3 - col) * step_x))
             cy = int(round(row6_cy - (6 - row) * step_y))
@@ -635,6 +701,7 @@ def is_slot_tagged_color(slot_bgr, style):
       - 'mage'  (Pure Blue #0000FF or Pure Cyan #00FFFF)
       - 'range' (Pure Green #00FF00)
       - 'melee' (Pure Red #FF0000)
+      - 'spec'  (Pure Magenta / Pink #FF00FF)
 
     Why this never false-positives on untagged items (like Blighted Ice/Veng Sacks or potions):
     1. Every untagged OSRS item sprite is enclosed by a 1px pure-black silhouette border
@@ -678,6 +745,18 @@ def is_slot_tagged_color(slot_bgr, style):
         # Pure Red (#FF0000): high R, both G and B suppressed
         tag_mask = (r >= 195) & (g <= 45) & (b <= 45) & ((r - g) >= 150) & ((r - b) >= 150)
         fill_border = (r >= 115) & (g <= 45) & (b <= 45) & ((r - g) >= 75) & ((r - b) >= 75)
+    elif style == "spec":
+        # Pure Magenta / Pink (#FF00FF): both R and B high, G suppressed, R and B balanced
+        tag_mask = (
+            (r >= 195) & (b >= 195) & (g <= 45)
+            & ((r - g) >= 150) & ((b - g) >= 150)
+            & (np.abs(r - b) <= 45)
+        )
+        fill_border = (
+            (r >= 115) & (b >= 115) & (g <= 45)
+            & ((r - g) >= 70) & ((b - g) >= 70)
+            & (np.abs(r - b) <= 40)
+        )
     else:
         return False
 
@@ -696,12 +775,14 @@ def is_slot_tagged_color(slot_bgr, style):
 
 
 @timing_decorator
-def equip_tagged_gear(style):
+def equip_tagged_gear(style, append_first_spec=False):
     """
     Take a SINGLE screenshot of the 28-slot inventory grid, find all slots tagged with
     the requested style ('mage' = blue/cyan, 'range' = green, 'melee' = red), and click them rapidly.
+    If append_first_spec=True, also scans top->bottom, left->right for the 1st 'spec' (Magenta #FF00FF)
+    tagged item and clicks it LAST.
     """
-    slots = get_inventory_slot_boxes()
+    slots = get_inventory_slot_boxes(zigzag=True)
     ux1 = min(s[2][0] for s in slots)
     uy1 = min(s[2][1] for s in slots)
     ux2 = max(s[2][2] for s in slots)
@@ -716,12 +797,24 @@ def equip_tagged_gear(style):
         if is_slot_tagged_color(slot_bgr, style):
             matched_slots.append((row, col, click_box))
 
+    first_spec_slot = None
+    if append_first_spec:
+        # Scan strictly top->bottom (row 0..6), left->right (col 0..3) for the 1st Magenta ('spec') item
+        for row, col, (dx1, dy1, dx2, dy2), click_box in get_inventory_slot_boxes(zigzag=False):
+            slot_bgr = inv_bgr[dy1 - uy1:dy2 - uy1, dx1 - ux1:dx2 - ux1]
+            if is_slot_tagged_color(slot_bgr, "spec"):
+                first_spec_slot = (row, col, click_box)
+                break
+        if first_spec_slot is not None:
+            matched_slots.append(first_spec_slot)
+
     for idx, (row, col, click_box) in enumerate(matched_slots):
         if idx > 0:
             time.sleep(random.uniform(0.012, 0.022))
         fast_click_spot(click_box)
 
-    print(f"[Gear] Switched '{style}' gear ({len(matched_slots)} items clicked: {[(r, c) for r, c, _ in matched_slots]}).")
+    spec_info = f" + spec at {(first_spec_slot[0], first_spec_slot[1])}" if first_spec_slot else ""
+    print(f"[Gear] Switched '{style}' gear{spec_info} ({len(matched_slots)} items clicked: {[(r, c) for r, c, _ in matched_slots]}).")
     return len(matched_slots)
 
 
@@ -733,6 +826,85 @@ def select_spell(spell_key="ice_barrage"):
         print(f"[Magic] Selected spell '{spell_key}' at {box}.")
     elif spell_key in SPELL_TEMPLATES:
         find_and_click_image(SPELL_TEMPLATES[spell_key], searching_areas.get("magic_panel", searching_areas["inventory"]), fast=True)
+
+
+@timing_decorator
+def activate_spec_orb():
+    """
+    Check the Special Attack orb next to the minimap and click it ONLY if it is not yet activated.
+    Compares 3-channel BGR template correlation against spec_orb_unactive.png vs spec_orb_active.png
+    so the vivid cyan-blue unactive orb is cleanly distinguished from the glowing active orb.
+    """
+    unactive_tmpl = get_cached_template(SPEC_ORB_TEMPLATES["unactive"], color=True)
+    active_tmpl = get_cached_template(SPEC_ORB_TEMPLATES["active"], color=True)
+    if unactive_tmpl is None:
+        fast_click_spot(clicking_areas["spec"])
+        return True
+
+    th, tw = unactive_tmpl.shape[:2]
+    pad = max(4, int(round(6 * ui_scale)))
+    sbox = searching_areas.get("spec")
+    if not (isinstance(sbox, tuple) and len(sbox) == 4):
+        bx1, by1, bx2, by2 = clicking_areas["spec"]
+        sbox = (max(0, bx1 - pad), max(0, by1 - pad), bx2 + pad, by2 + pad)
+
+    sx1, sy1, sx2, sy2 = sbox
+    sx2 = max(sx2, sx1 + tw + 4)
+    sy2 = max(sy2, sy1 + th + 4)
+
+    shot = pyautogui.screenshot(region=(sx1, sy1, sx2 - sx1, sy2 - sy1))
+    patch_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
+
+    res_unactive = cv2.matchTemplate(patch_bgr, unactive_tmpl, cv2.TM_CCOEFF_NORMED)
+    _, unactive_val, _, unactive_loc = cv2.minMaxLoc(res_unactive)
+
+    active_val = -1.0
+    if active_tmpl is not None and patch_bgr.shape[0] >= active_tmpl.shape[0] and patch_bgr.shape[1] >= active_tmpl.shape[1]:
+        res_active = cv2.matchTemplate(patch_bgr, active_tmpl, cv2.TM_CCOEFF_NORMED)
+        _, active_val, _, _ = cv2.minMaxLoc(res_active)
+
+    # If neither template matched strongly in searching_areas["spec"], rescan the minimap column once
+    if max(unactive_val, active_val) < 0.72:
+        full_shot = pyautogui.screenshot()
+        full_bgr = cv2.cvtColor(np.array(full_shot), cv2.COLOR_RGB2BGR)
+        full_gray = cv2.cvtColor(full_bgr, cv2.COLOR_BGR2GRAY)
+        sh, sw = full_gray.shape[:2]
+        pm_box = clicking_areas.get("prot_mage", BASELINE_CLICKING_AREAS["prot_mage"])
+        if _calibrate_spec_orb_from_screen(full_gray, pm_box[0], pm_box[1], sw, sh):
+            sx1, sy1, sx2, sy2 = searching_areas["spec"]
+            sx2 = max(sx2, sx1 + tw + 4)
+            sy2 = max(sy2, sy1 + th + 4)
+            patch_bgr = full_bgr[sy1:sy2, sx1:sx2]
+            if patch_bgr.shape[0] >= th and patch_bgr.shape[1] >= tw:
+                _, unactive_val, _, unactive_loc = cv2.minMaxLoc(
+                    cv2.matchTemplate(patch_bgr, unactive_tmpl, cv2.TM_CCOEFF_NORMED)
+                )
+                if active_tmpl is not None and patch_bgr.shape[0] >= active_tmpl.shape[0] and patch_bgr.shape[1] >= active_tmpl.shape[1]:
+                    _, active_val, _, _ = cv2.minMaxLoc(
+                        cv2.matchTemplate(patch_bgr, active_tmpl, cv2.TM_CCOEFF_NORMED)
+                    )
+
+    if active_val >= unactive_val and active_val >= 0.75:
+        print(f"[Spec] Spec orb already active (active={active_val:.3f} >= unactive={unactive_val:.3f}) — skipping.")
+        return False
+
+    if unactive_val >= 0.72:
+        inset_x = max(2, int(round(4 * ui_scale)))
+        inset_y = max(2, int(round(4 * ui_scale)))
+        matched_click_box = (
+            sx1 + unactive_loc[0] + inset_x,
+            sy1 + unactive_loc[1] + inset_y,
+            sx1 + unactive_loc[0] + tw - inset_x,
+            sy1 + unactive_loc[1] + th - inset_y,
+        )
+        clicking_areas["spec"] = matched_click_box
+        fast_click_spot(matched_click_box)
+        print(f"[Spec] Activated spec orb (unactive={unactive_val:.3f}, active={active_val:.3f}).")
+        return True
+
+    print(f"[Spec] Spec orb state uncertain (unactive={unactive_val:.3f}, active={active_val:.3f}) — clicking calibrated spec spot.")
+    fast_click_spot(clicking_areas["spec"])
+    return True
 
 
 @timing_decorator
@@ -805,9 +977,28 @@ def on_f3_press(e):
 @timing_decorator
 # @throttle
 def on_f4_press(e):
+    """
+    F4: Swap to Melee gear (Red tag) + 1st Spec weapon (Magenta #FF00FF tag) last,
+    activate Piety, return to Inventory tab, click Spec Orb last (if not already active),
+    and restore cursor to its original position.
+    """
     if e.event_type == keyboard.KEY_DOWN:
-        double_click_spot(clicking_areas["quick_prayers"])
-        click_spot(clicking_areas["inventory_tag"])
+        orig_x, orig_y = pyautogui.position()
+
+        # 1. Open Inventory, equip all Red melee gear, then click the 1st Magenta spec weapon (top->bottom, left->right) last
+        fast_click_spot(clicking_areas["inventory_tag"])
+        time.sleep(random.uniform(0.055, 0.07))
+        equip_tagged_gear("melee", append_first_spec=True)
+
+        # 2. Open Prayer tab and activate Piety (if not already active)
+        fast_click_spot(clicking_areas["prayer_tag"])
+        time.sleep(random.uniform(0.065, 0.08))
+        activate_prayers("piety")
+
+        # 3. Return to Inventory tab, activate Spec Orb last (if not already active), and restore cursor
+        fast_click_spot(clicking_areas["inventory_tag"])
+        activate_spec_orb()
+        pyautogui.moveTo(orig_x, orig_y, _pause=False)
 
 
 def is_prayer_active_glow(patch_bgr):
