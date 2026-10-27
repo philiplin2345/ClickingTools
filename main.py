@@ -61,6 +61,24 @@ SPEC_ORB_TEMPLATES = {
     "active": "images/spec_orb_active.png",
 }
 
+# Combo-eat item templates (Hard food -> Saradomin brew -> Karambwan) with dose counts
+COMBO_FOOD_TEMPLATES = {
+    "hard_food": [
+        ("shark", "images/shark.png", 1),
+        ("blighted_manta_ray", "images/blighted_manta_ray.png", 1),
+        ("blighted_anglerfish", "images/blighted_anglerfish.png", 1),
+    ],
+    "brew": [
+        ("saradomin_brew_4", "images/saradomin_brew_4.png", 4),
+        ("saradomin_brew_3", "images/saradomin_brew_3.png", 3),
+        ("saradomin_brew_2", "images/saradomin_brew_2.png", 2),
+        ("saradomin_brew_1", "images/saradomin_brew_1.png", 1),
+    ],
+    "karambwan": [
+        ("karambwan", "images/karambwan.png", 1),
+    ],
+}
+
 BASELINE_SEARCHING_AREAS = {
     "prayers": (1886, 1097, 2046, 1147),
     "prot_mage": (1886, 1099, 1929, 1145),
@@ -653,7 +671,7 @@ def click_spots(areas):
         time.sleep(random.uniform(0.1, 0.5))
 
 
-def get_inventory_slot_boxes(zigzag=True):
+def get_inventory_slot_boxes(zigzag=True, detect_hw_base=22, detect_hh_base=20):
     """
     Compute all 28 OSRS inventory slot bounding boxes (7 rows x 4 columns)
     anchored from clicking_areas['last_inventory_spot'] (which is row=6, col=3).
@@ -668,8 +686,8 @@ def get_inventory_slot_boxes(zigzag=True):
     # At 1.0x baseline scale (360px wide side panel), slot pitch is 63px horizontal x 54px vertical
     step_x = 63.0 * ui_scale
     step_y = 54.0 * ui_scale
-    detect_hw = max(12, int(round(22 * ui_scale)))
-    detect_hh = max(10, int(round(20 * ui_scale)))
+    detect_hw = max(12, int(round(detect_hw_base * ui_scale)))
+    detect_hh = max(10, int(round(detect_hh_base * ui_scale)))
     click_hw = max(6, int(round(12 * ui_scale)))
     click_hh = max(6, int(round(11 * ui_scale)))
 
@@ -781,8 +799,9 @@ def equip_tagged_gear(style, append_first_spec=False):
     the requested style ('mage' = blue/cyan, 'range' = green, 'melee' = red), and click them rapidly.
     If append_first_spec=True, also scans top->bottom, left->right for the 1st 'spec' (Magenta #FF00FF)
     tagged item and clicks it LAST.
+    Also uses the captured inventory screenshot in the background to refresh the combo-eat slot cache.
     """
-    slots = get_inventory_slot_boxes(zigzag=True)
+    slots = get_inventory_slot_boxes(zigzag=True, detect_hw_base=27, detect_hh_base=25)
     ux1 = min(s[2][0] for s in slots)
     uy1 = min(s[2][1] for s in slots)
     ux2 = max(s[2][2] for s in slots)
@@ -791,8 +810,15 @@ def equip_tagged_gear(style, append_first_spec=False):
     shot = pyautogui.screenshot(region=(ux1, uy1, ux2 - ux1, uy2 - uy1))
     inv_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
 
+    # Refresh the combo-eat slot cache asynchronously using this inventory screenshot
+    threading.Thread(
+        target=update_combo_eat_cache_from_bgr,
+        args=(inv_bgr.copy(), ux1, uy1),
+        daemon=True,
+    ).start()
+
     matched_slots = []
-    for row, col, (dx1, dy1, dx2, dy2), click_box in slots:
+    for row, col, (dx1, dy1, dx2, dy2), click_box in get_inventory_slot_boxes(zigzag=True):
         slot_bgr = inv_bgr[dy1 - uy1:dy2 - uy1, dx1 - ux1:dx2 - ux1]
         if is_slot_tagged_color(slot_bgr, style):
             matched_slots.append((row, col, click_box))
@@ -1083,7 +1109,9 @@ def activate_prayer(prayer_key):
 @timing_decorator
 # @throttle
 def on_f5_press(e):
+    global _combo_dwell_pause_until
     if e.event_type == keyboard.KEY_DOWN:
+        _combo_dwell_pause_until = time.time() + 0.3
         fast_click_spot(clicking_areas["prayer_tag"])
         time.sleep(random.uniform(0.065, 0.08))
         activate_prayers("prot_mage", "augury")
@@ -1093,7 +1121,9 @@ def on_f5_press(e):
 @timing_decorator
 # @throttle
 def on_f6_press(e):
+    global _combo_dwell_pause_until
     if e.event_type == keyboard.KEY_DOWN:
+        _combo_dwell_pause_until = time.time() + 0.3
         fast_click_spot(clicking_areas["prayer_tag"])
         time.sleep(random.uniform(0.065, 0.08))
         activate_prayers("prot_range", "rigour")
@@ -1103,21 +1133,201 @@ def on_f6_press(e):
 @timing_decorator
 # @throttle
 def on_f7_press(e):
+    global _combo_dwell_pause_until
     if e.event_type == keyboard.KEY_DOWN:
+        _combo_dwell_pause_until = time.time() + 0.3
         fast_click_spot(clicking_areas["prayer_tag"])
         time.sleep(random.uniform(0.065, 0.08))
         activate_prayers("prot_melee", "piety")
         fast_click_spot(clicking_areas["inventory_tag"])
 
+# Pre-cached combo-eat queues updated in the background during inventory dwell time:
+# Each entry is [row, col, click_box, item_name, remaining_doses]
+_combo_cache_lock = Lock()
+_combo_eat_cache = {
+    "hard_food": [],
+    "brew": [],
+    "karambwan": [],
+}
+_combo_cache_initialized = False
+_combo_dwell_pause_until = 0.0
+INVENTORY_DWELL_POLL_INTERVAL = 0.25  # Background scan interval (250ms) during idle inventory dwell
+
+
+def classify_combo_eat_slot(slot_bgr, threshold=0.82):
+    """
+    Classify a single inventory slot BGR patch into ('hard_food', 'brew', or 'karambwan').
+    Uses yellow-liquid pre-filtering so brew vs non-brew templates never cross-check unnecessarily.
+    Returns (category, item_name, doses, confidence) or None.
+    """
+    if slot_bgr is None or slot_bgr.size == 0:
+        return None
+
+    sh, sw = slot_bgr.shape[:2]
+    b = slot_bgr[:, :, 0].astype(np.int16)
+    g = slot_bgr[:, :, 1].astype(np.int16)
+    r = slot_bgr[:, :, 2].astype(np.int16)
+
+    # Fast skip for empty brown stone inventory slots (~BGR 41, 53, 62)
+    fg_mask = (np.abs(b - 41) > 15) | (np.abs(g - 53) > 15) | (np.abs(r - 62) > 15)
+    if int(np.count_nonzero(fg_mask)) < max(40, int(round(80 * (ui_scale ** 2)))):
+        return None
+
+    # Check if the slot has Saradomin brew bright yellow liquid
+    yellow_mask = (r >= 155) & (g >= 155) & (b <= 110) & ((r - b) >= 65) & (np.abs(r - g) <= 40)
+    min_yellow = max(35, int(round(90 * (ui_scale ** 2))))
+    has_brew_yellow = int(np.count_nonzero(yellow_mask)) >= min_yellow
+
+    candidate_categories = ("brew",) if has_brew_yellow else ("hard_food", "karambwan")
+
+    best_cat = None
+    best_name = None
+    best_doses = 1
+    best_val = -1.0
+
+    for category in candidate_categories:
+        for item_name, tmpl_path, doses in COMBO_FOOD_TEMPLATES.get(category, ()):
+            tmpl = get_cached_template(tmpl_path, color=True)
+            if tmpl is None:
+                continue
+            th, tw = tmpl.shape[:2]
+            if sh < th or sw < tw:
+                continue
+            res = cv2.matchTemplate(slot_bgr, tmpl, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(res)
+            if max_val >= threshold and max_val > best_val:
+                best_val = max_val
+                best_cat = category
+                best_name = item_name
+                best_doses = doses
+
+    if best_cat is not None:
+        return best_cat, best_name, best_doses, best_val
+    return None
+
+
+def update_combo_eat_cache_from_bgr(inv_bgr, ux1, uy1):
+    """
+    Scan all 28 inventory slots from a captured inventory BGR image and update _combo_eat_cache.
+    If no food/brew/karambwan is visible (e.g. Prayer or Magic tab is currently open),
+    preserves the existing cached inventory layout.
+    """
+    global _combo_cache_initialized
+    slots = get_inventory_slot_boxes(zigzag=False, detect_hw_base=27, detect_hh_base=25)
+    new_queues = {"hard_food": [], "brew": [], "karambwan": []}
+    total_found = 0
+
+    for row, col, (dx1, dy1, dx2, dy2), click_box in slots:
+        slot_bgr = inv_bgr[dy1 - uy1:dy2 - uy1, dx1 - ux1:dx2 - ux1]
+        match = classify_combo_eat_slot(slot_bgr)
+        if match is not None:
+            cat, item_name, doses, _ = match
+            new_queues[cat].append([row, col, click_box, item_name, doses])
+            total_found += 1
+
+    if total_found > 0:
+        with _combo_cache_lock:
+            for cat in ("hard_food", "brew", "karambwan"):
+                _combo_eat_cache[cat] = new_queues[cat]
+            _combo_cache_initialized = True
+    return total_found
+
+
+def refresh_combo_eat_cache_now():
+    """Capture the 28-slot inventory region once and update the pre-cached combo-eat queues."""
+    slots = get_inventory_slot_boxes(zigzag=False, detect_hw_base=27, detect_hh_base=25)
+    ux1 = min(s[2][0] for s in slots)
+    uy1 = min(s[2][1] for s in slots)
+    ux2 = max(s[2][2] for s in slots)
+    uy2 = max(s[2][3] for s in slots)
+    shot = pyautogui.screenshot(region=(ux1, uy1, ux2 - ux1, uy2 - uy1))
+    inv_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
+    return update_combo_eat_cache_from_bgr(inv_bgr, ux1, uy1)
+
+
+def inventory_dwell_watcher_loop():
+    """
+    Background daemon that uses idle dwell time in the inventory to keep the next
+    combo-eat slots (hard_food, brew, karambwan) pre-cached in memory so pressing F8
+    requires zero screenshots or image recognition.
+    """
+    while True:
+        try:
+            if time.time() >= _combo_dwell_pause_until:
+                refresh_combo_eat_cache_now()
+        except Exception:
+            pass
+        time.sleep(INVENTORY_DWELL_POLL_INTERVAL)
+
+
+def _pop_next_cached_combo_targets():
+    """
+    Atomically pop the next (hard_food, brew, karambwan) click targets from _combo_eat_cache.
+    Decrements brew dose count (4 -> 3 -> 2 -> 1 -> pop) so consecutive F8 presses stay accurate
+    even before the next background dwell scan.
+    """
+    targets = []
+    with _combo_cache_lock:
+        for cat in ("hard_food", "brew", "karambwan"):
+            queue = _combo_eat_cache.get(cat, [])
+            if not queue:
+                continue
+            row, col, click_box, item_name, doses = queue[0]
+            targets.append((cat, row, col, click_box, item_name))
+            if cat == "brew" and doses > 1:
+                queue[0][4] = doses - 1
+            else:
+                queue.pop(0)
+    return targets
+
+
+@timing_decorator
+def combo_eat():
+    """
+    Perform a zero-screenshot 1-tick OSRS combo eat using the dwell-cached inventory slots:
+      1. Click Inventory tab
+      2. Click cached Standard/Heavy Food (Shark, Blighted Manta Ray, or Blighted Anglerfish)
+      3. Click cached Saradomin Brew
+      4. Click cached Karambwan
+    """
+    global _combo_dwell_pause_until
+    # Pause background dwell scanner briefly while clicking + 1 tick (0.6s) so consumed slots update cleanly
+    _combo_dwell_pause_until = time.time() + 0.65
+
+    # Open Inventory tab immediately
+    fast_click_spot(clicking_areas["inventory_tag"])
+
+    # Fallback only if F8 is pressed before the background dwell scanner has ever seen the inventory
+    if not _combo_cache_initialized:
+        time.sleep(random.uniform(0.05, 0.065))
+        refresh_combo_eat_cache_now()
+    else:
+        time.sleep(random.uniform(0.012, 0.02))
+
+    targets = _pop_next_cached_combo_targets()
+
+    clicked_items = []
+    for idx, (cat, row, col, click_box, item_name) in enumerate(targets):
+        if idx > 0:
+            time.sleep(random.uniform(0.012, 0.02))
+        fast_click_spot(click_box)
+        clicked_items.append(f"{item_name}@({row},{col})")
+
+    if clicked_items:
+        print(f"[ComboEat] Ate {' -> '.join(clicked_items)}")
+    else:
+        print("[ComboEat] No cached food, brew, or karambwan remaining.")
+    return len(clicked_items)
+
+
 @timing_decorator
 # @throttle
 def on_f8_press(e):
+    """F8: Perform 1-tick Combo Eat (Inventory -> Hard food -> Brew -> Karambwan) using pre-cached slots."""
     if e.event_type == keyboard.KEY_DOWN:
-        click_spot(clicking_areas["inventory_tag"])
-        time.sleep(random.uniform(0.05, 0.1))
-        find_and_click_image(clicking_areas["sgs"],searching_areas["inventory"])
-        time.sleep(random.uniform(0.7, 0.8))
-        click_spot(clicking_areas["spec"])
+        orig_x, orig_y = pyautogui.position()
+        combo_eat()
+        pyautogui.moveTo(orig_x, orig_y, _pause=False)
     
 def fast_click_spot(area):
     """Click a spot with minimal hover delay so OSRS registers the cursor position before clicking."""
@@ -1368,6 +1578,9 @@ def toggle_clicking(e):
 # Load persisted areas if available, then attempt an initial screen scan
 load_areas_config()
 refresh_areas()
+
+# Start background inventory dwell watcher to pre-cache combo-eat slots
+threading.Thread(target=inventory_dwell_watcher_loop, daemon=True).start()
 
 # Set up the listeners for F1-F11 and Esc keys
 keyboard.on_press_key("f1", on_f1_press)
