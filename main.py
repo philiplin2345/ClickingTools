@@ -2,6 +2,7 @@ import keyboard
 import pyautogui
 import time
 import random
+import ctypes
 import numpy as np
 import cv2
 import functools
@@ -62,6 +63,8 @@ SPEC_ORB_TEMPLATES = {
     "unactive": "images/spec_orb_unactive.png",
     "active": "images/spec_orb_active.png",
 }
+
+GMAUL_TEMPLATE_PATH = "images/granite_maul.png"
 
 # Combo-eat item templates (Hard food -> Saradomin brew -> Karambwan) with dose counts
 COMBO_FOOD_TEMPLATES = {
@@ -1239,6 +1242,80 @@ _combo_cache_initialized = False
 _combo_dwell_pause_until = 0.0
 INVENTORY_DWELL_POLL_INTERVAL = 0.25  # Background scan interval (250ms) during idle inventory dwell
 
+# Pre-cached Granite Maul inventory click box and F9 next-left-click arming state
+_cached_gmaul_box = None
+gmaul_armed = False
+_gmaul_core_tmpl = None
+
+
+def _get_gmaul_templates():
+    """
+    Load and cache both the BGR template and the binary foreground silhouette mask of granite_maul.png.
+    The binary silhouette mask matches 100% identically whether the Granite Maul is highlighted
+    (RuneLite Inventory Tags Outline/Fill of any color) or unhighlighted.
+    """
+    key = ("gmaul_tmpls", ui_scale)
+    if key in _template_cache:
+        return _template_cache[key]
+    raw = cv2.imread(GMAUL_TEMPLATE_PATH, cv2.IMREAD_COLOR)
+    if raw is None:
+        return None
+    trimmed = auto_trim_crop(raw, margin=2)
+    if ui_scale != 1.0:
+        th, tw = trimmed.shape[:2]
+        rw = max(4, int(round(tw * ui_scale)))
+        rh = max(4, int(round(th * ui_scale)))
+        trimmed = cv2.resize(
+            trimmed, (rw, rh), interpolation=cv2.INTER_AREA if ui_scale < 1.0 else cv2.INTER_LINEAR
+        )
+    # Build binary silhouette mask (1.0 for item pixels, 0.0 for brown inventory background)
+    bg = trimmed[0, 0].astype(np.int16)
+    diff = np.abs(trimmed.astype(np.int16) - bg).max(axis=2)
+    sil_mask = (diff > 15).astype(np.float32)
+
+    _template_cache[key] = (trimmed, sil_mask)
+    return trimmed, sil_mask
+
+
+def _find_gmaul_box_in_bgr(inv_bgr, ux1, uy1, threshold=0.80):
+    """
+    Locate the Granite Maul inside an inventory grid BGR image whether it is
+    unhighlighted OR highlighted (tagged with RuneLite Inventory Tags Outline/Fill).
+    """
+    tmpls = _get_gmaul_templates()
+    if tmpls is None or inv_bgr is None or inv_bgr.size == 0:
+        return None
+    bgr_tmpl, sil_tmpl = tmpls
+    ih, iw = inv_bgr.shape[:2]
+    th, tw = bgr_tmpl.shape[:2]
+    if ih < th or iw < tw:
+        return None
+
+    # 1. Direct BGR template match (for unhighlighted Granite Maul)
+    res_bgr = cv2.matchTemplate(inv_bgr, bgr_tmpl, cv2.TM_CCOEFF_NORMED)
+    _, bgr_val, _, bgr_loc = cv2.minMaxLoc(res_bgr)
+
+    # 2. Binary foreground silhouette match (matches highlighted/tagged Granite Maul of any color)
+    b = inv_bgr[:, :, 0].astype(np.int16)
+    g = inv_bgr[:, :, 1].astype(np.int16)
+    r = inv_bgr[:, :, 2].astype(np.int16)
+    inv_sil = ((np.abs(b - 41) > 15) | (np.abs(g - 53) > 15) | (np.abs(r - 62) > 15)).astype(np.float32)
+    res_sil = cv2.matchTemplate(inv_sil, sil_tmpl, cv2.TM_CCOEFF_NORMED)
+    _, sil_val, _, sil_loc = cv2.minMaxLoc(res_sil)
+
+    if bgr_val >= threshold and bgr_val >= sil_val:
+        best_loc = bgr_loc
+    elif sil_val >= 0.82:
+        best_loc = sil_loc
+    else:
+        return None
+
+    cx = int(round(ux1 + best_loc[0] + tw / 2.0))
+    cy = int(round(uy1 + best_loc[1] + th / 2.0))
+    hw = max(5, int(round(8 * ui_scale)))
+    hh = max(5, int(round(8 * ui_scale)))
+    return (max(0, cx - hw), max(0, cy - hh), cx + hw, cy + hh)
+
 
 def classify_combo_eat_slot(slot_bgr, threshold=0.82):
     """
@@ -1294,11 +1371,12 @@ def classify_combo_eat_slot(slot_bgr, threshold=0.82):
 
 def update_combo_eat_cache_from_bgr(inv_bgr, ux1, uy1):
     """
-    Scan all 28 inventory slots from a captured inventory BGR image and update _combo_eat_cache.
+    Scan all 28 inventory slots from a captured inventory BGR image and update _combo_eat_cache
+    as well as _cached_gmaul_box.
     If no food/brew/karambwan is visible (e.g. Prayer or Magic tab is currently open),
     preserves the existing cached inventory layout.
     """
-    global _combo_cache_initialized
+    global _combo_cache_initialized, _cached_gmaul_box
     slots = get_inventory_slot_boxes(zigzag=False, detect_hw_base=27, detect_hh_base=25)
     new_queues = {"hard_food": [], "brew": [], "karambwan": []}
     total_found = 0
@@ -1310,6 +1388,11 @@ def update_combo_eat_cache_from_bgr(inv_bgr, ux1, uy1):
             cat, item_name, doses, _ = match
             new_queues[cat].append([row, col, click_box, item_name, doses])
             total_found += 1
+
+    gmaul_box = _find_gmaul_box_in_bgr(inv_bgr, ux1, uy1)
+    if gmaul_box is not None:
+        with _combo_cache_lock:
+            _cached_gmaul_box = gmaul_box
 
     if total_found > 0:
         with _combo_cache_lock:
@@ -1414,6 +1497,106 @@ def on_f8_press(e):
         orig_x, orig_y = pyautogui.position()
         combo_eat()
         pyautogui.moveTo(orig_x, orig_y, _pause=False)
+
+
+def _is_point_in_ui_panel(x, y):
+    """Return True if (x, y) is inside the right-hand inventory/side panel or minimap spec orb."""
+    for area_key in ("inventory_panel", "magic_panel", "spec"):
+        box = searching_areas.get(area_key)
+        if isinstance(box, tuple) and len(box) == 4:
+            if box[0] - 25 <= x <= box[2] + 25 and box[1] - 45 <= y <= box[3] + 45:
+                return True
+    return False
+
+
+@timing_decorator
+def execute_gmaul_spec(enemy_x, enemy_y):
+    """
+    Immediately equip the Granite Maul from inventory and click the Spec Orb,
+    then restore cursor to (enemy_x, enemy_y).
+    """
+    global _combo_dwell_pause_until, _cached_gmaul_box
+    _combo_dwell_pause_until = time.time() + 0.5
+
+    with _combo_cache_lock:
+        gmaul_box = _cached_gmaul_box
+
+    # Fallback scan if Granite Maul wasn't cached yet
+    if gmaul_box is None:
+        slots = get_inventory_slot_boxes(zigzag=False, detect_hw_base=27, detect_hh_base=25)
+        ux1 = min(s[2][0] for s in slots)
+        uy1 = min(s[2][1] for s in slots)
+        ux2 = max(s[2][2] for s in slots)
+        uy2 = max(s[2][3] for s in slots)
+        shot = pyautogui.screenshot(region=(ux1, uy1, ux2 - ux1, uy2 - uy1))
+        inv_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
+        gmaul_box = _find_gmaul_box_in_bgr(inv_bgr, ux1, uy1)
+        if gmaul_box is not None:
+            with _combo_cache_lock:
+                _cached_gmaul_box = gmaul_box
+
+    if gmaul_box is None:
+        print("[Gmaul] Granite Maul not found in inventory!")
+        return False
+
+    # 1. Click Granite Maul in inventory
+    fast_click_spot(gmaul_box)
+    time.sleep(random.uniform(0.015, 0.025))
+
+    # 2. Click Spec Orb to fire the instant Gmaul special attack
+    fast_click_spot(clicking_areas["spec"])
+
+    # 3. Restore cursor back onto the enemy
+    pyautogui.moveTo(enemy_x, enemy_y, _pause=False)
+    print(f"[Gmaul] Equipped Granite Maul at {gmaul_box} -> clicked Spec Orb!")
+    return True
+
+
+def _gmaul_next_click_worker():
+    """
+    Wait for the user's next left mouse click on the enemy (outside the inventory/spec UI panels),
+    then immediately trigger execute_gmaul_spec().
+    """
+    global gmaul_armed
+    user32 = ctypes.windll.user32
+
+    # Wait until any currently held left mouse button is released first
+    while gmaul_armed and (user32.GetAsyncKeyState(0x01) & 0x8000):
+        time.sleep(0.002)
+
+    while gmaul_armed:
+        if user32.GetAsyncKeyState(0x01) & 0x8000:
+            click_x, click_y = pyautogui.position()
+            # Wait for left button release so OSRS cleanly registers the user's click first
+            while gmaul_armed and (user32.GetAsyncKeyState(0x01) & 0x8000):
+                time.sleep(0.002)
+            if not gmaul_armed:
+                break
+            # Ignore setup clicks inside the inventory panel or spec orb so only the click on the enemy triggers Gmaul
+            if _is_point_in_ui_panel(click_x, click_y):
+                continue
+            gmaul_armed = False
+            time.sleep(random.uniform(0.015, 0.025))
+            execute_gmaul_spec(click_x, click_y)
+            break
+        time.sleep(0.002)
+
+
+def on_f9_press(e):
+    """F9: Arm/disarm 1-tick AGS -> Granite Maul combo on next left click on enemy."""
+    global gmaul_armed
+    if e.event_type == keyboard.KEY_DOWN:
+        if not gmaul_armed:
+            gmaul_armed = True
+            threading.Thread(target=refresh_combo_eat_cache_now, daemon=True).start()
+            threading.Thread(target=_gmaul_next_click_worker, daemon=True).start()
+            print(
+                "[Gmaul] ARMED! Upon your next left-click on the enemy, script will click Granite Maul -> Spec Orb. "
+                "(Press F9 again to cancel)"
+            )
+        else:
+            gmaul_armed = False
+            print("[Gmaul] DISARMED.")
     
 def fast_click_spot(area):
     """Click a spot with minimal hover delay so OSRS registers the cursor position before clicking."""
@@ -1677,12 +1860,12 @@ keyboard.on_press_key("f5", on_f5_press)
 keyboard.on_press_key("f6", on_f6_press)
 keyboard.on_press_key("f7", on_f7_press)
 keyboard.on_press_key("f8", on_f8_press)
-keyboard.on_press_key("f9", toggle_clicking)
+keyboard.on_press_key("f9", on_f9_press)
 keyboard.on_press_key("f10", on_f10_press)
 keyboard.on_press_key("f11", toggle_alarm_watcher)
 keyboard.on_press_key("f12", toggle_barrage_spell)
 keyboard.on_press_key("esc", on_esc_press)
-print("Listening for F1-F9, Esc, F10 (refresh areas), F11 (toggle PKer alarm), and F12 (toggle Ice/Blood Barrage). Press Ctrl+C to exit.")
+print("Listening for F1-F8, F9 (arm AGS->Gmaul on next click), Esc, F10 (refresh), F11 (PKer alarm), and F12 (Ice/Blood Barrage). Press Ctrl+C to exit.")
 
 # Keep the script running
 keyboard.wait()
