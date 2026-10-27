@@ -32,6 +32,7 @@ BASELINE_CLICKING_AREAS = {
     "augury": (1998, 1216, 2040, 1255),
     "piety": (1884, 1223, 1930, 1247),
     "ice_barrage": (1910, 1240, 1944, 1277),
+    "blood_barrage": (1840, 1246, 1871, 1277),
     "sgs": "images/sgs.png",
     "rock1": (1363, 721, 1469, 817),
     "rock2": (1039, 463, 1159, 546),
@@ -51,6 +52,7 @@ PRAYER_TEMPLATES = {
 }
 
 # Master spell icon templates used during F10 / startup calibration to lock in exact spell coordinates
+# Note: blood_barrage is always derived directly 1 column left of ice_barrage so it never false-matches shadow/smoke barrage
 SPELL_TEMPLATES = {
     "ice_barrage": "images/ice_barrage.png",
 }
@@ -89,6 +91,7 @@ BASELINE_SEARCHING_AREAS = {
     "augury": (1996, 1214, 2042, 1257),
     "piety": (1882, 1221, 1932, 1249),
     "ice_barrage": (1906, 1236, 1948, 1281),
+    "blood_barrage": (1836, 1242, 1875, 1281),
     "spec": (1918, 238, 1966, 286),
     "prayer_panel": (1820, 1035, 2055, 1265),
     "magic_panel": (1820, 920, 2110, 1290),
@@ -144,6 +147,9 @@ alarm_watching = False
 alarm_thread = None
 ALARM_POLL_INTERVAL = 0.025  # 25ms (~40 Hz, ~24 checks per OSRS tick)
 ALARM_COOLDOWN = 4.0         # Seconds to pause/disarm after triggering teleport
+
+# Active barrage spell selected on F1 ('ice_barrage' by default, toggled to 'blood_barrage' via F12)
+active_barrage_spell = "ice_barrage"
 
 
 def timing_decorator(func):
@@ -219,6 +225,24 @@ def load_areas_config():
         for k, v in data.get("baseline_prayer_boxes", {}).items():
             if k in icon_keys and isinstance(v, list) and len(v) == 4:
                 BASELINE_CLICKING_AREAS[k] = tuple(v)
+        # Always lock 'blood_barrage' directly 1 column (-72px center-to-center) left of 'ice_barrage'
+        if isinstance(clicking_areas.get("ice_barrage"), tuple) and len(clicking_areas["ice_barrage"]) == 4:
+            ix1, iy1, ix2, iy2 = clicking_areas["ice_barrage"]
+            # ice_barrage.png (34x37) has 3px left & 7px top background padding; true 29x29 icon is at (+3..+32, +7..+36)
+            icx = ix1 + 17.5 * ui_scale if (iy2 - iy1) >= int(round(34 * ui_scale)) else (ix1 + ix2) / 2.0
+            icy = iy1 + 21.5 * ui_scale if (iy2 - iy1) >= int(round(34 * ui_scale)) else (iy1 + iy2) / 2.0
+            bcx = icx - 72.0 * ui_scale
+            bcy = icy
+            r_half = max(6, int(round(10 * ui_scale)))
+            clicking_areas["blood_barrage"] = (
+                max(0, int(round(bcx - r_half))),
+                max(0, int(round(bcy - r_half))),
+                max(1, int(round(bcx + r_half))),
+                max(1, int(round(bcy + r_half))),
+            )
+        if isinstance(BASELINE_CLICKING_AREAS.get("ice_barrage"), tuple):
+            bix1, biy1, _, biy2 = BASELINE_CLICKING_AREAS["ice_barrage"]
+            BASELINE_CLICKING_AREAS["blood_barrage"] = (bix1 - 69, biy1 + 7, bix1 - 40, biy1 + 36)
         print(f"[Config] Loaded calibrated areas from '{CONFIG_FILE}' (scale={ui_scale:.3f}).")
         return True
     except Exception as exc:
@@ -594,6 +618,31 @@ def refresh_areas(open_prayer_tab=False):
                     cv2.imwrite(os.path.join(ANCHORS_DIR, f"{spell_key}.png"), auto_trim_crop(spell_crop, margin=1))
                 print(f"  -> Calibrated spell '{spell_key}' box={clicking_areas[spell_key]} (conf={sval:.3f})")
 
+    # Always lock 'blood_barrage' directly 1 column (-72px center-to-center) left of 'ice_barrage'
+    if isinstance(clicking_areas.get("ice_barrage"), tuple) and len(clicking_areas["ice_barrage"]) == 4:
+        ix1, iy1, ix2, iy2 = clicking_areas["ice_barrage"]
+        icx = ix1 + 17.5 * ui_scale if (iy2 - iy1) >= int(round(34 * ui_scale)) else (ix1 + ix2) / 2.0
+        icy = iy1 + 21.5 * ui_scale if (iy2 - iy1) >= int(round(34 * ui_scale)) else (iy1 + iy2) / 2.0
+        bcx = icx - 72.0 * ui_scale
+        bcy = icy
+        r_half = max(6, int(round(10 * ui_scale)))
+        bb_x1 = max(0, int(round(bcx - r_half)))
+        bb_y1 = max(0, int(round(bcy - r_half)))
+        bb_x2 = min(screen_w - 1, int(round(bcx + r_half)))
+        bb_y2 = min(screen_h - 1, int(round(bcy + r_half)))
+        clicking_areas["blood_barrage"] = (bb_x1, bb_y1, bb_x2, bb_y2)
+        if isinstance(BASELINE_CLICKING_AREAS.get("ice_barrage"), tuple):
+            bix1, biy1, _, biy2 = BASELINE_CLICKING_AREAS["ice_barrage"]
+            BASELINE_CLICKING_AREAS["blood_barrage"] = (bix1 - 69, biy1 + 7, bix1 - 40, biy1 + 36)
+        pad = max(2, int(round(2 * ui_scale)))
+        searching_areas["blood_barrage"] = (
+            max(0, bb_x1 - pad),
+            max(0, bb_y1 - pad),
+            min(screen_w - 1, bb_x2 + pad),
+            min(screen_h - 1, bb_y2 + pad),
+        )
+        print(f"  -> Locked 'blood_barrage' directly left of 'ice_barrage': box={clicking_areas['blood_barrage']}")
+
     # Calibrate minimap Special Attack orb position (handles any window height since it's attached to minimap)
     _calibrate_spec_orb_from_screen(screen_gray, origin_x, origin_y, screen_w, screen_h)
 
@@ -623,18 +672,26 @@ def on_f10_press(e):
         refresh_areas(open_prayer_tab=True)
 
 
-def weighted_random_point_in_area(area, center_weight=0.7):
+def weighted_random_point_in_area(area, center_weight=0.85):
     x_min, y_min, x_max, y_max = area
-    center_x, center_y = (x_min + x_max) / 2, (y_min + y_max) / 2
+    center_x, center_y = (x_min + x_max) / 2.0, (y_min + y_max) / 2.0
     width, height = x_max - x_min, y_max - y_min
-    
+
+    # Restrict clicks to the inner 50% around the exact center so clicks never drift near icon edges
+    inner_rx = max(1.0, width * 0.25)
+    inner_ry = max(1.0, height * 0.25)
+    inner_x_min = int(round(center_x - inner_rx))
+    inner_x_max = int(round(center_x + inner_rx))
+    inner_y_min = int(round(center_y - inner_ry))
+    inner_y_max = int(round(center_y + inner_ry))
+
     while True:
-        # Generate a point using a normal distribution
-        x = int(random.gauss(center_x, width * (1 - center_weight) / 2))
-        y = int(random.gauss(center_y, height * (1 - center_weight) / 2))
-        
-        # Check if the point is within the area
-        if x_min <= x <= x_max and y_min <= y <= y_max:
+        # Generate a point using a tight normal distribution centered on the icon
+        x = int(round(random.gauss(center_x, max(1.0, width * (1 - center_weight) / 2))))
+        y = int(round(random.gauss(center_y, max(1.0, height * (1 - center_weight) / 2))))
+
+        # Ensure the point lands strictly within the inner center region
+        if inner_x_min <= x <= inner_x_max and inner_y_min <= y <= inner_y_max:
             return (x, y)
 
 # def weighted_random_point_in_area(area, center_weight=0.7):
@@ -845,8 +902,25 @@ def equip_tagged_gear(style, append_first_spec=False):
 
 
 def select_spell(spell_key="ice_barrage"):
-    """Click a calibrated spell slot (such as 'ice_barrage') on the Magic tab."""
-    box = clicking_areas.get(spell_key)
+    """Click the exact center of a calibrated spell slot ('ice_barrage' or 'blood_barrage') on the Magic tab."""
+    if spell_key in ("ice_barrage", "blood_barrage") and isinstance(clicking_areas.get("ice_barrage"), tuple):
+        ix1, iy1, ix2, iy2 = clicking_areas["ice_barrage"]
+        # ice_barrage.png (34x37) has 3px left & 7px top background padding; true 29x29 icon center is (+17.5, +21.5)
+        icx = ix1 + 17.5 * ui_scale if (iy2 - iy1) >= int(round(34 * ui_scale)) else (ix1 + ix2) / 2.0
+        icy = iy1 + 21.5 * ui_scale if (iy2 - iy1) >= int(round(34 * ui_scale)) else (iy1 + iy2) / 2.0
+        cx = icx - 72.0 * ui_scale if spell_key == "blood_barrage" else icx
+        cy = icy
+        r_half = max(3, int(round(5 * ui_scale)))
+        box = (
+            max(0, int(round(cx - r_half))),
+            max(0, int(round(cy - r_half))),
+            max(1, int(round(cx + r_half))),
+            max(1, int(round(cy + r_half))),
+        )
+        if spell_key == "blood_barrage":
+            clicking_areas["blood_barrage"] = box
+    else:
+        box = clicking_areas.get(spell_key)
     if isinstance(box, tuple) and len(box) == 4:
         fast_click_spot(box)
         print(f"[Magic] Selected spell '{spell_key}' at {box}.")
@@ -935,8 +1009,10 @@ def activate_spec_orb():
 
 @timing_decorator
 def on_f1_press(e):
-    """F1: Swap to Mage gear (Blue/Cyan tag), activate Augury, select Ice Barrage, and restore cursor."""
+    """F1: Swap to Mage gear (Blue/Cyan tag), activate Augury, select active barrage spell (Ice/Blood), and restore cursor."""
+    global _combo_dwell_pause_until
     if e.event_type == keyboard.KEY_DOWN:
+        _combo_dwell_pause_until = time.time() + 0.35
         orig_x, orig_y = pyautogui.position()
 
         # 1. Open Inventory and equip Mage gear
@@ -949,13 +1025,23 @@ def on_f1_press(e):
         time.sleep(random.uniform(0.065, 0.08))
         activate_prayers("augury")
 
-        # 3. Open Magic tab and select Ice Barrage
+        # 3. Open Magic tab and select active Barrage spell ('ice_barrage' or 'blood_barrage')
         fast_click_spot(clicking_areas["magic_tag"])
         time.sleep(random.uniform(0.055, 0.07))
-        select_spell("ice_barrage")
+        select_spell(active_barrage_spell)
 
         # 4. Return cursor to its original position so user can immediately click target
         pyautogui.moveTo(orig_x, orig_y, _pause=False)
+
+
+def toggle_barrage_spell(e):
+    """Toggle the spell selected by F1 between 'ice_barrage' and 'blood_barrage' on F12 press."""
+    global active_barrage_spell
+    if e.event_type == keyboard.KEY_DOWN:
+        active_barrage_spell = (
+            "blood_barrage" if active_barrage_spell == "ice_barrage" else "ice_barrage"
+        )
+        print(f"[Magic] F1 barrage spell toggled to '{active_barrage_spell}'.")
 
 
 @timing_decorator
@@ -1594,9 +1680,9 @@ keyboard.on_press_key("f8", on_f8_press)
 keyboard.on_press_key("f9", toggle_clicking)
 keyboard.on_press_key("f10", on_f10_press)
 keyboard.on_press_key("f11", toggle_alarm_watcher)
+keyboard.on_press_key("f12", toggle_barrage_spell)
 keyboard.on_press_key("esc", on_esc_press)
-# keyboard.on_press_key("f12", on_f12_press)
-print("Listening for F1-F9, Esc, F10 (refresh areas), and F11 (toggle PKer alarm auto-tele). Press Ctrl+C to exit.")
+print("Listening for F1-F9, Esc, F10 (refresh areas), F11 (toggle PKer alarm), and F12 (toggle Ice/Blood Barrage). Press Ctrl+C to exit.")
 
 # Keep the script running
 keyboard.wait()
