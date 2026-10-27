@@ -100,6 +100,7 @@ BASELINE_SEARCHING_AREAS = {
     "magic_panel": (1820, 920, 2110, 1290),
     "inventory_panel": (1842, 928, 2088, 1304),
     "inventory": (1835, 920, 2100, 1050),
+    "hp_bar": (1801, 927, 1813, 1300),
     "alarm_patch": (1600, 920, 1640, 960)
 }
 
@@ -1240,7 +1241,10 @@ _combo_eat_cache = {
 }
 _combo_cache_initialized = False
 _combo_dwell_pause_until = 0.0
-INVENTORY_DWELL_POLL_INTERVAL = 0.25  # Background scan interval (250ms) during idle inventory dwell
+_auto_eat_cooldown_until = 0.0
+INVENTORY_DWELL_POLL_INTERVAL = 0.15  # Background scan interval (150ms) for HP bar + inventory dwell cache
+AUTO_EAT_HP_THRESHOLD = 50.0          # Automatically combo-eat whenever HP falls below 50
+AUTO_EAT_COOLDOWN = 1.25              # Seconds (~2 ticks) to wait after auto-eating before re-triggering
 
 # Pre-cached Granite Maul inventory click box and F9 next-left-click arming state
 _cached_gmaul_box = None
@@ -1402,28 +1406,111 @@ def update_combo_eat_cache_from_bgr(inv_bgr, ux1, uy1):
     return total_found
 
 
-def refresh_combo_eat_cache_now():
-    """Capture the 28-slot inventory region once and update the pre-cached combo-eat queues."""
+def _get_hp_bar_box():
+    """
+    Return the (x1, y1, x2, y2) bounding box of the left-pillar RuneLite HP status bar,
+    derived directly from clicking_areas['prot_mage'] (which is at offset (-87..-75, -174..+199)).
+    """
+    pm = clicking_areas.get("prot_mage")
+    if isinstance(pm, tuple) and len(pm) == 4:
+        ox, oy = pm[0], pm[1]
+        return (
+            max(0, int(round(ox - 87 * ui_scale))),
+            max(0, int(round(oy - 174 * ui_scale))),
+            max(1, int(round(ox - 75 * ui_scale))),
+            max(1, int(round(oy + 199 * ui_scale))),
+        )
+    return searching_areas.get("hp_bar", (1801, 927, 1813, 1300))
+
+
+def read_hp_from_bar(strip_bgr):
+    """
+    Estimate current HP (0.0..99.0) from the vertical RuneLite left-pillar HP status bar strip.
+    Returns None if the status bar is not visible on screen (e.g. another window covers OSRS).
+    """
+    if strip_bgr is None or strip_bgr.size == 0:
+        return None
+    h, w = strip_bgr.shape[:2]
+    if h < 40 or w < 4:
+        return None
+
+    b = strip_bgr[:, :, 0].astype(np.int16)
+    g = strip_bgr[:, :, 1].astype(np.int16)
+    r = strip_bgr[:, :, 2].astype(np.int16)
+
+    # Filled HP row: bright red (R >= 90, R - B >= 50) or poison/venom green (G >= 75, G - B >= 35)
+    filled_px = ((r >= 90) & ((r - b) >= 50)) | ((g >= 75) & ((g - b) >= 35))
+    # Unfilled background row: dark charcoal (~BGR 20, 25, 29)
+    unfilled_px = (r <= 48) & (g <= 48) & (b <= 48)
+
+    # Inspect the lower 80% of the bar (below the heart icon and numeric digits, covering 0..79 HP)
+    y_start = int(round(h * 0.20))
+    lower_filled = filled_px[y_start:, :].mean(axis=1) >= 0.6
+    lower_unfilled = unfilled_px[y_start:, :].mean(axis=1) >= 0.6
+
+    # Validate that this strip is genuinely the OSRS status bar and player has > 0 HP
+    if float(np.mean(lower_filled | lower_unfilled)) < 0.85 or not np.any(lower_filled[-8:]):
+        return None
+
+    unfilled_rows = np.where(~lower_filled)[0]
+    if len(unfilled_rows) == 0:
+        return 96.0
+    first_filled_y = y_start + int(unfilled_rows[-1]) + 1
+    filled_height = max(0, h - first_filled_y)
+    return round(99.0 * filled_height / float(h), 1)
+
+
+def refresh_combo_eat_cache_now(check_auto_eat=False):
+    """
+    Capture the left-pillar HP bar + 28-slot inventory region in a SINGLE screenshot,
+    update the pre-cached combo-eat queues, and optionally return the current HP reading.
+    """
     slots = get_inventory_slot_boxes(zigzag=False, detect_hw_base=27, detect_hh_base=25)
-    ux1 = min(s[2][0] for s in slots)
-    uy1 = min(s[2][1] for s in slots)
-    ux2 = max(s[2][2] for s in slots)
-    uy2 = max(s[2][3] for s in slots)
+    inv_x1 = min(s[2][0] for s in slots)
+    inv_y1 = min(s[2][1] for s in slots)
+    inv_x2 = max(s[2][2] for s in slots)
+    inv_y2 = max(s[2][3] for s in slots)
+
+    hx1, hy1, hx2, hy2 = _get_hp_bar_box()
+    ux1 = min(inv_x1, hx1) if check_auto_eat else inv_x1
+    uy1 = min(inv_y1, hy1) if check_auto_eat else inv_y1
+    ux2 = max(inv_x2, hx2) if check_auto_eat else inv_x2
+    uy2 = max(inv_y2, hy2) if check_auto_eat else inv_y2
+
     shot = pyautogui.screenshot(region=(ux1, uy1, ux2 - ux1, uy2 - uy1))
-    inv_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
-    return update_combo_eat_cache_from_bgr(inv_bgr, ux1, uy1)
+    full_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
+
+    inv_bgr = full_bgr[inv_y1 - uy1:inv_y2 - uy1, inv_x1 - ux1:inv_x2 - ux1]
+    update_combo_eat_cache_from_bgr(inv_bgr, inv_x1, inv_y1)
+
+    if check_auto_eat:
+        hp_strip = full_bgr[hy1 - uy1:hy2 - uy1, hx1 - ux1:hx2 - ux1]
+        return read_hp_from_bar(hp_strip)
+    return None
 
 
 def inventory_dwell_watcher_loop():
     """
-    Background daemon that uses idle dwell time in the inventory to keep the next
-    combo-eat slots (hard_food, brew, karambwan) pre-cached in memory so pressing F8
-    requires zero screenshots or image recognition.
+    Background daemon that:
+      1. Keeps the next combo-eat slots (hard_food, brew, karambwan) and Granite Maul pre-cached
+      2. Monitors the left-pillar RuneLite HP bar and automatically combo-eats when HP < 50
     """
+    global _auto_eat_cooldown_until
     while True:
         try:
-            if time.time() >= _combo_dwell_pause_until:
-                refresh_combo_eat_cache_now()
+            now = time.time()
+            if now >= _combo_dwell_pause_until:
+                current_hp = refresh_combo_eat_cache_now(check_auto_eat=True)
+                if (
+                    current_hp is not None
+                    and 0.0 < current_hp < AUTO_EAT_HP_THRESHOLD
+                    and time.time() >= _auto_eat_cooldown_until
+                ):
+                    _auto_eat_cooldown_until = time.time() + AUTO_EAT_COOLDOWN
+                    orig_x, orig_y = pyautogui.position()
+                    print(f"[AutoEat] HP dropped to ~{current_hp:.0f} (< {AUTO_EAT_HP_THRESHOLD:.0f}) — triggering combo eat!")
+                    combo_eat()
+                    pyautogui.moveTo(orig_x, orig_y, _pause=False)
         except Exception:
             pass
         time.sleep(INVENTORY_DWELL_POLL_INTERVAL)
