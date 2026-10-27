@@ -1552,9 +1552,16 @@ def execute_gmaul_spec(enemy_x, enemy_y):
     return True
 
 
+# Delay (in seconds) after your left-click on the enemy before equipping Granite Maul + clicking Spec Orb.
+# In OSRS, switching weapons on the same 0.6s tick as clicking the enemy cancels the queued AGS spec;
+# waiting ~0.42-0.48s lets the AGS spec fire on the current tick and stacks the instant Gmaul spec on the next tick.
+GMAUL_POST_CLICK_DELAY = (0.07, 0.08)
+
+
 def _gmaul_next_click_worker():
     """
     Wait for the user's next left mouse click on the enemy (outside the inventory/spec UI panels),
+    wait GMAUL_POST_CLICK_DELAY so the initial AGS spec registers on the current tick,
     then immediately trigger execute_gmaul_spec().
     """
     global gmaul_armed
@@ -1576,7 +1583,7 @@ def _gmaul_next_click_worker():
             if _is_point_in_ui_panel(click_x, click_y):
                 continue
             gmaul_armed = False
-            time.sleep(random.uniform(0.015, 0.025))
+            time.sleep(random.uniform(*GMAUL_POST_CLICK_DELAY))
             execute_gmaul_spec(click_x, click_y)
             break
         time.sleep(0.002)
