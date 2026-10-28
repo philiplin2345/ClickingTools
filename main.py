@@ -104,14 +104,15 @@ BASELINE_SEARCHING_AREAS = {
     "alarm_patch": (1600, 920, 1640, 960)
 }
 
-# Reference templates and their top-left offset (dx, dy) from BASELINE_ORIGIN at 1.0x scale
+# Reference templates and their top-left offset (dx, dy) from BASELINE_ORIGIN at 1.0x scale.
+# Tab stones are listed FIRST because at least 2 of the 3 are always unselected/visible regardless of which tab is open.
 ANCHOR_TEMPLATES = [
-    ("prot_mage", "images/protect_from_mage.png", (0, 0)),
-    ("prot_range", "images/protect_from_range.png", (58, 5)),
-    ("prot_melee", "images/protect_from_melee.png", (110, -2)),
     ("prayer_tag", os.path.join(ANCHORS_DIR, "prayer_tag.png"), (166, -227)),
     ("inventory_tag", os.path.join(ANCHORS_DIR, "inventory_tag.png"), (67, -227)),
     ("magic_tag", os.path.join(ANCHORS_DIR, "magic_tag.png"), (215, -224)),
+    ("prot_mage", "images/protect_from_mage.png", (0, 0)),
+    ("prot_range", "images/protect_from_range.png", (58, 5)),
+    ("prot_melee", "images/protect_from_melee.png", (110, -2)),
 ]
 
 clicking_areas = dict(BASELINE_CLICKING_AREAS)
@@ -426,8 +427,13 @@ def refresh_areas(open_prayer_tab=False):
     screen_h, screen_w = screen_gray.shape[:2]
 
     matched_anchors = {}
+    fast_scales = [ui_scale] if ui_scale == 1.0 else [ui_scale, 1.0]
+
+    # Pass 1: Fast check at [ui_scale, 1.0] (avoids 25-scale full-screen search when Prayer tab is closed!)
     for name, path, offset in ANCHOR_TEMPLATES:
-        # Prefer calibrated crop in images/anchors/ if available, falling back to master template
+        # On startup (open_prayer_tab=False), once 2 tab stones match, skip checking prayer icons
+        if not open_prayer_tab and len(matched_anchors) >= 2 and name in ("prot_mage", "prot_range", "prot_melee"):
+            continue
         anchor_override = os.path.join(ANCHORS_DIR, f"{name}.png")
         candidate_paths = [anchor_override, path] if anchor_override != path else [path]
         for cpath in candidate_paths:
@@ -436,7 +442,7 @@ def refresh_areas(open_prayer_tab=False):
             tmpl = cv2.imread(cpath, 0)
             if tmpl is None:
                 continue
-            match = match_template_multiscale(screen_gray, tmpl, threshold=0.78)
+            match = match_template_multiscale(screen_gray, tmpl, scales=fast_scales, threshold=0.78)
             if match is not None:
                 val, loc, scale_est, size = match
                 matched_anchors[name] = {
@@ -448,6 +454,30 @@ def refresh_areas(open_prayer_tab=False):
                 }
                 print(f"  -> Matched '{name}' at {loc} (confidence={val:.3f}, scale={scale_est:.2f})")
                 break
+
+    # Pass 2: Full 25-scale fallback only if Pass 1 found nothing (e.g. UI scale changed)
+    if not matched_anchors:
+        for name, path, offset in ANCHOR_TEMPLATES:
+            anchor_override = os.path.join(ANCHORS_DIR, f"{name}.png")
+            candidate_paths = [anchor_override, path] if anchor_override != path else [path]
+            for cpath in candidate_paths:
+                if not os.path.exists(cpath):
+                    continue
+                tmpl = cv2.imread(cpath, 0)
+                if tmpl is None:
+                    continue
+                match = match_template_multiscale(screen_gray, tmpl, threshold=0.78)
+                if match is not None:
+                    val, loc, scale_est, size = match
+                    matched_anchors[name] = {
+                        "val": val,
+                        "loc": loc,
+                        "scale": scale_est,
+                        "size": size,
+                        "offset": offset,
+                    }
+                    print(f"  -> Matched '{name}' at {loc} (confidence={val:.3f}, scale={scale_est:.2f})")
+                    break
 
     if not matched_anchors:
         print(
@@ -494,20 +524,20 @@ def refresh_areas(open_prayer_tab=False):
             cv2.imwrite(os.path.join(ANCHORS_DIR, "prayer_tag.png"), p_crop)
 
         print("  -> Opening Prayer tab briefly to calibrate exact prayer icon positions...")
-        click_spot(clicking_areas["prayer_tag"])
+        fast_click_spot(clicking_areas["prayer_tag"])
         time.sleep(0.15)
         screenshot_pil = pyautogui.screenshot()
         screen_bgr = cv2.cvtColor(np.array(screenshot_pil), cv2.COLOR_RGB2BGR)
         screen_gray = cv2.cvtColor(screen_bgr, cv2.COLOR_BGR2GRAY)
         opened_tab_temporarily = True
 
-    # Scan the Prayer panel for all prayers in PRAYER_TEMPLATES to lock in their exact coordinates
+    # Scan the Prayer panel for all prayers in PRAYER_TEMPLATES only when Prayer tab is open (or during F10)
     px1, py1, px2, py2 = searching_areas.get("prayer_panel", (1820, 1035, 2055, 1265))
     panel_gray = screen_gray[py1:py2, px1:px2]
     panel_bgr = screen_bgr[py1:py2, px1:px2]
 
     matched_prayers_count = 0
-    if panel_gray.size > 0:
+    if panel_gray.size > 0 and (len(prayer_keys) >= 1 or open_prayer_tab or missing_prayer_anchors):
         for prayer_key, master_path in PRAYER_TEMPLATES.items():
             if not os.path.exists(master_path):
                 continue
@@ -585,7 +615,7 @@ def refresh_areas(open_prayer_tab=False):
     mx1, my1, mx2, my2 = searching_areas.get("magic_panel", (1820, 920, 2110, 1290))
     mpanel_gray = screen_gray[my1:my2, mx1:mx2]
     mpanel_bgr = screen_bgr[my1:my2, mx1:mx2]
-    if mpanel_gray.size > 0:
+    if mpanel_gray.size > 0 and (open_prayer_tab or missing_spell_anchors):
         for spell_key, master_path in SPELL_TEMPLATES.items():
             if not os.path.exists(master_path):
                 continue
@@ -1938,14 +1968,54 @@ def toggle_clicking(e):
             stop_clicking()
 
 
-# Load persisted areas if available, then attempt an initial screen scan
+def wait_for_menu_and_calibrate():
+    """
+    Background startup task: if the script is launched while VSCode or another window is focused,
+    poll lightly for the OSRS side-panel menu (tab stones) to appear on screen.
+    As soon as you switch to the RuneLite screen, it clicks the Prayer tab and runs the full calibration.
+    """
+    global _combo_dwell_pause_until
+    fast_scales = [ui_scale] if ui_scale == 1.0 else [ui_scale, 1.0]
+    menu_anchors = [
+        ("prayer_tag", os.path.join(ANCHORS_DIR, "prayer_tag.png")),
+        ("inventory_tag", os.path.join(ANCHORS_DIR, "inventory_tag.png")),
+        ("magic_tag", os.path.join(ANCHORS_DIR, "magic_tag.png")),
+        ("prot_mage", "images/protect_from_mage.png"),
+    ]
+    loaded_tmpls = []
+    for name, path in menu_anchors:
+        if os.path.exists(path):
+            t = cv2.imread(path, 0)
+            if t is not None:
+                loaded_tmpls.append((name, t))
+
+    printed_waiting = False
+    while True:
+        screenshot_pil = pyautogui.screenshot()
+        screen_gray = cv2.cvtColor(np.array(screenshot_pil), cv2.COLOR_RGB2GRAY)
+
+        menu_visible = False
+        for name, tmpl in loaded_tmpls:
+            if match_template_multiscale(screen_gray, tmpl, scales=fast_scales, threshold=0.78) is not None:
+                menu_visible = True
+                break
+
+        if menu_visible:
+            # Pause background dwell scanner while initial calibration clicks Prayer & Magic tabs
+            _combo_dwell_pause_until = time.time() + 1.5
+            refresh_areas(open_prayer_tab=True)
+            break
+
+        if not printed_waiting:
+            print("[Startup] Waiting for OSRS RuneLite menu on screen... (Switch to RuneLite window)")
+            printed_waiting = True
+        time.sleep(0.25)
+
+
+# Load persisted areas if available
 load_areas_config()
-refresh_areas()
 
-# Start background inventory dwell watcher to pre-cache combo-eat slots
-threading.Thread(target=inventory_dwell_watcher_loop, daemon=True).start()
-
-# Set up the listeners for F1-F11 and Esc keys
+# Set up the listeners for F1-F12 and Esc keys immediately (zero startup delay)
 keyboard.on_press_key("f1", on_f1_press)
 keyboard.on_press_key("f2", on_f2_press)
 keyboard.on_press_key("f3", on_f3_press)
@@ -1960,6 +2030,12 @@ keyboard.on_press_key("f11", toggle_alarm_watcher)
 keyboard.on_press_key("f12", toggle_barrage_spell)
 keyboard.on_press_key("esc", on_esc_press)
 print("Listening for F1-F8, F9 (arm AGS->Gmaul on next click), Esc, F10 (refresh), F11 (PKer alarm), and F12 (Ice/Blood Barrage). Press Ctrl+C to exit.")
+
+# Watch for RuneLite menu to appear on screen, then click Prayer tab and run full calibration
+threading.Thread(target=wait_for_menu_and_calibrate, daemon=True).start()
+
+# Start background inventory dwell watcher to pre-cache combo-eat slots and monitor HP bar
+threading.Thread(target=inventory_dwell_watcher_loop, daemon=True).start()
 
 # Keep the script running
 keyboard.wait()
