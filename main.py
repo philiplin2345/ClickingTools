@@ -1246,7 +1246,7 @@ def on_f6_press(e):
         _combo_dwell_pause_until = time.time() + 0.3
         fast_click_spot(clicking_areas["prayer_tag"])
         time.sleep(random.uniform(0.065, 0.08))
-        activate_prayers("prot_range", "rigour")
+        activate_prayers("prot_range")
         fast_click_spot(clicking_areas["inventory_tag"])
 
 
@@ -1258,7 +1258,7 @@ def on_f7_press(e):
         _combo_dwell_pause_until = time.time() + 0.3
         fast_click_spot(clicking_areas["prayer_tag"])
         time.sleep(random.uniform(0.065, 0.08))
-        activate_prayers("prot_melee", "piety")
+        activate_prayers("prot_melee")
         fast_click_spot(clicking_areas["inventory_tag"])
 
 # Pre-cached combo-eat queues updated in the background during inventory dwell time:
