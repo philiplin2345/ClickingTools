@@ -156,6 +156,13 @@ ALARM_COOLDOWN = 4.0         # Seconds to pause/disarm after triggering teleport
 # Active barrage spell selected on F1 ('ice_barrage' by default, toggled to 'blood_barrage' via F12)
 active_barrage_spell = "ice_barrage"
 
+# Automatic opponent overhead prayer -> offensive style (F1/F2/F3) watcher state (toggled via '`')
+current_equipped_style = "range"
+auto_overhead_watching = False
+auto_overhead_thread = None
+OVERHEAD_POLL_INTERVAL = 0.12        # 120ms (~5 checks per OSRS tick)
+AUTO_STYLE_SWITCH_COOLDOWN = 1.2     # Seconds to wait after an automatic style switch before switching again
+
 
 def timing_decorator(func):
     @functools.wraps(func)  # Preserve the original function's metadata
@@ -1042,30 +1049,36 @@ def activate_spec_orb():
 
 
 @timing_decorator
+def execute_f1_mage_switch():
+    """Swap to Mage gear (Blue/Cyan tag), activate Augury, select active barrage spell (Ice/Blood), and restore cursor."""
+    global _combo_dwell_pause_until, current_equipped_style
+    _combo_dwell_pause_until = time.time() + 0.35
+    current_equipped_style = "mage"
+    orig_x, orig_y = pyautogui.position()
+
+    # 1. Open Inventory and equip Mage gear
+    fast_click_spot(clicking_areas["inventory_tag"])
+    time.sleep(random.uniform(0.055, 0.07))
+    equip_tagged_gear("mage")
+
+    # 2. Open Prayer tab and activate Augury (if not already active)
+    fast_click_spot(clicking_areas["prayer_tag"])
+    time.sleep(random.uniform(0.065, 0.08))
+    activate_prayers("augury")
+
+    # 3. Open Magic tab and select active Barrage spell ('ice_barrage' or 'blood_barrage')
+    fast_click_spot(clicking_areas["magic_tag"])
+    time.sleep(random.uniform(0.055, 0.07))
+    select_spell(active_barrage_spell)
+
+    # 4. Return cursor to its original position so user can immediately click target
+    pyautogui.moveTo(orig_x, orig_y, _pause=False)
+
+
 def on_f1_press(e):
-    """F1: Swap to Mage gear (Blue/Cyan tag), activate Augury, select active barrage spell (Ice/Blood), and restore cursor."""
-    global _combo_dwell_pause_until
+    """F1: Swap to Mage gear, activate Augury, select active barrage spell, and restore cursor."""
     if e.event_type == keyboard.KEY_DOWN:
-        _combo_dwell_pause_until = time.time() + 0.35
-        orig_x, orig_y = pyautogui.position()
-
-        # 1. Open Inventory and equip Mage gear
-        fast_click_spot(clicking_areas["inventory_tag"])
-        time.sleep(random.uniform(0.055, 0.07))
-        equip_tagged_gear("mage")
-
-        # 2. Open Prayer tab and activate Augury (if not already active)
-        fast_click_spot(clicking_areas["prayer_tag"])
-        time.sleep(random.uniform(0.065, 0.08))
-        activate_prayers("augury")
-
-        # 3. Open Magic tab and select active Barrage spell ('ice_barrage' or 'blood_barrage')
-        fast_click_spot(clicking_areas["magic_tag"])
-        time.sleep(random.uniform(0.055, 0.07))
-        select_spell(active_barrage_spell)
-
-        # 4. Return cursor to its original position so user can immediately click target
-        pyautogui.moveTo(orig_x, orig_y, _pause=False)
+        execute_f1_mage_switch()
 
 
 def toggle_barrage_spell(e):
@@ -1079,45 +1092,61 @@ def toggle_barrage_spell(e):
 
 
 @timing_decorator
+def execute_f2_range_switch():
+    """Swap to Range gear (Green tag), activate Rigour, return to Inventory tab, and restore cursor."""
+    global _combo_dwell_pause_until, current_equipped_style
+    _combo_dwell_pause_until = time.time() + 0.35
+    current_equipped_style = "range"
+    orig_x, orig_y = pyautogui.position()
+
+    # 1. Open Inventory and equip Range gear
+    fast_click_spot(clicking_areas["inventory_tag"])
+    time.sleep(random.uniform(0.055, 0.07))
+    equip_tagged_gear("range")
+
+    # 2. Open Prayer tab and activate Rigour (if not already active)
+    fast_click_spot(clicking_areas["prayer_tag"])
+    time.sleep(random.uniform(0.065, 0.08))
+    activate_prayers("rigour")
+
+    # 3. Return to Inventory tab and restore cursor to original position
+    fast_click_spot(clicking_areas["inventory_tag"])
+    pyautogui.moveTo(orig_x, orig_y, _pause=False)
+
+
 def on_f2_press(e):
-    """F2: Swap to Range gear (Green tag), activate Rigour, return to Inventory tab, and restore cursor."""
+    """F2: Swap to Range gear, activate Rigour, return to Inventory tab, and restore cursor."""
     if e.event_type == keyboard.KEY_DOWN:
-        orig_x, orig_y = pyautogui.position()
-
-        # 1. Open Inventory and equip Range gear
-        fast_click_spot(clicking_areas["inventory_tag"])
-        time.sleep(random.uniform(0.055, 0.07))
-        equip_tagged_gear("range")
-
-        # 2. Open Prayer tab and activate Rigour (if not already active)
-        fast_click_spot(clicking_areas["prayer_tag"])
-        time.sleep(random.uniform(0.065, 0.08))
-        activate_prayers("rigour")
-
-        # 3. Return to Inventory tab and restore cursor to original position
-        fast_click_spot(clicking_areas["inventory_tag"])
-        pyautogui.moveTo(orig_x, orig_y, _pause=False)
+        execute_f2_range_switch()
 
 
 @timing_decorator
+def execute_f3_melee_switch():
+    """Swap to Melee gear (Red tag), activate Piety, return to Inventory tab, and restore cursor."""
+    global _combo_dwell_pause_until, current_equipped_style
+    _combo_dwell_pause_until = time.time() + 0.35
+    current_equipped_style = "melee"
+    orig_x, orig_y = pyautogui.position()
+
+    # 1. Open Inventory and equip Melee gear
+    fast_click_spot(clicking_areas["inventory_tag"])
+    time.sleep(random.uniform(0.055, 0.07))
+    equip_tagged_gear("melee")
+
+    # 2. Open Prayer tab and activate Piety (if not already active)
+    fast_click_spot(clicking_areas["prayer_tag"])
+    time.sleep(random.uniform(0.065, 0.08))
+    activate_prayers("piety")
+
+    # 3. Return to Inventory tab and restore cursor to original position
+    fast_click_spot(clicking_areas["inventory_tag"])
+    pyautogui.moveTo(orig_x, orig_y, _pause=False)
+
+
 def on_f3_press(e):
-    """F3: Swap to Melee gear (Red tag), activate Piety, return to Inventory tab, and restore cursor."""
+    """F3: Swap to Melee gear, activate Piety, return to Inventory tab, and restore cursor."""
     if e.event_type == keyboard.KEY_DOWN:
-        orig_x, orig_y = pyautogui.position()
-
-        # 1. Open Inventory and equip Melee gear
-        fast_click_spot(clicking_areas["inventory_tag"])
-        time.sleep(random.uniform(0.055, 0.07))
-        equip_tagged_gear("melee")
-
-        # 2. Open Prayer tab and activate Piety (if not already active)
-        fast_click_spot(clicking_areas["prayer_tag"])
-        time.sleep(random.uniform(0.065, 0.08))
-        activate_prayers("piety")
-
-        # 3. Return to Inventory tab and restore cursor to original position
-        fast_click_spot(clicking_areas["inventory_tag"])
-        pyautogui.moveTo(orig_x, orig_y, _pause=False)
+        execute_f3_melee_switch()
 
 
 @timing_decorator
@@ -1128,7 +1157,10 @@ def on_f4_press(e):
     activate Piety, return to Inventory tab, click Spec Orb last (if not already active),
     and restore cursor to its original position.
     """
+    global _combo_dwell_pause_until, current_equipped_style
     if e.event_type == keyboard.KEY_DOWN:
+        _combo_dwell_pause_until = time.time() + 0.35
+        current_equipped_style = "melee"
         orig_x, orig_y = pyautogui.position()
 
         # 1. Open Inventory, equip all Red melee gear, then click the 1st Magenta spec weapon (top->bottom, left->right) last
@@ -1721,6 +1753,188 @@ def on_f9_press(e):
         else:
             gmaul_armed = False
             print("[Gmaul] DISARMED.")
+
+
+def _get_overhead_scan_region():
+    """
+    Return the (x, y, w, h) game viewport region to scan for the opponent's overhead protection prayer.
+    When the cursor is in the 3D game viewport, scans a 340x320 box centered above the cursor;
+    when the cursor is over the right-hand UI panel, scans a 520x420 box to the left of the side panel.
+    """
+    cx, cy = pyautogui.position()
+    panel_box = searching_areas.get("inventory_panel", (1560, 1650, 1810, 2030))
+    panel_left = max(400, panel_box[0] - int(round(95 * ui_scale)))
+    panel_mid_y = (panel_box[1] + panel_box[3]) // 2
+
+    if not _is_point_in_ui_panel(cx, cy) and cx < panel_left:
+        w, h = int(round(340 * ui_scale)), int(round(320 * ui_scale))
+        x1 = max(0, min(cx - w // 2, panel_left - w))
+        y1 = max(0, cy - int(round(220 * ui_scale)))
+        return (x1, y1, w, h)
+
+    # Fallback: scan the central game viewport to the left of the side panel
+    w, h = int(round(520 * ui_scale)), int(round(420 * ui_scale))
+    x1 = max(0, panel_left - w - int(round(120 * ui_scale)))
+    y1 = max(0, panel_mid_y - h // 2 - int(round(80 * ui_scale)))
+    return (x1, y1, w, h)
+
+
+def detect_enemy_overhead_prayer():
+    """
+    Detect the opponent's overhead protection prayer ('mage', 'range', or 'melee') inside the game viewport.
+    Requires RuneLite Entity Hider ('Hide Others' = ON, 'Hide Attackers' = OFF, 'Hide Local Player 2D' = ON)
+    in crowded PvP areas so only your opponent's overhead prayer icon is visible on screen.
+    """
+    rx, ry, rw, rh = _get_overhead_scan_region()
+    if rw < 40 or rh < 40:
+        return None
+
+    shot = pyautogui.screenshot(region=(rx, ry, rw, rh))
+    patch_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
+
+    # 1. Check optional user-supplied overhead templates first if present (images/overhead_mage.png, etc.)
+    for style, custom_path in (
+        ("mage", "images/overhead_mage.png"),
+        ("range", "images/overhead_range.png"),
+        ("melee", "images/overhead_melee.png"),
+    ):
+        if os.path.exists(custom_path):
+            tmpl = get_cached_template(custom_path, color=True)
+            if tmpl is not None and patch_bgr.shape[0] >= tmpl.shape[0] and patch_bgr.shape[1] >= tmpl.shape[1]:
+                _, max_val, _, _ = cv2.minMaxLoc(cv2.matchTemplate(patch_bgr, tmpl, cv2.TM_CCOEFF_NORMED))
+                if max_val >= 0.80:
+                    return style
+
+    # 2. Locate candidate ~28x28 circular warm beige overhead prayer badge(s) in the viewport patch
+    b = patch_bgr[:, :, 0].astype(np.int16)
+    g = patch_bgr[:, :, 1].astype(np.int16)
+    r = patch_bgr[:, :, 2].astype(np.int16)
+
+    # OSRS overhead prayer circle background is warm beige/tan (~BGR 125, 165, 195)
+    beige_mask = (
+        (r >= 165) & (r <= 225)
+        & (g >= 140) & (g <= 198)
+        & (b >= 95) & (b <= 155)
+        & ((r - b) >= 40) & ((r - b) <= 95)
+        & ((r - g) >= 10) & ((r - g) <= 45)
+    ).astype(np.uint8)
+
+    kernel = np.ones((5, 5), dtype=np.uint8)
+    closed = cv2.morphologyEx(beige_mask, cv2.MORPH_CLOSE, kernel)
+    num_labels, _, stats, centroids = cv2.connectedComponentsWithStats(closed)
+
+    min_area = max(90, int(round(140 * (ui_scale ** 2))))
+    max_area = max(900, int(round(1600 * (ui_scale ** 2))))
+    half_box = max(14, int(round(18 * ui_scale)))
+
+    for i in range(1, num_labels):
+        area = stats[i, cv2.CC_STAT_AREA]
+        bw = stats[i, cv2.CC_STAT_WIDTH]
+        bh = stats[i, cv2.CC_STAT_HEIGHT]
+        if area < min_area or area > max_area:
+            continue
+        # Overhead badge is roughly circular/square (aspect ratio between 0.6 and 1.65)
+        if bw < 14 or bh < 14 or (bw / float(bh)) < 0.6 or (bw / float(bh)) > 1.65:
+            continue
+
+        cx_i, cy_i = int(round(centroids[i][0])), int(round(centroids[i][1]))
+        x1 = max(0, cx_i - half_box)
+        y1 = max(0, cy_i - half_box)
+        x2 = min(patch_bgr.shape[1], cx_i + half_box)
+        y2 = min(patch_bgr.shape[0], cy_i + half_box)
+
+        sub_b = b[y1:y2, x1:x2]
+        sub_g = g[y1:y2, x1:x2]
+        sub_r = r[y1:y2, x1:x2]
+
+        # A. Protect from Missiles ('range'): vivid green arrow fletching inside the beige circle
+        green_fletch = (sub_g >= 105) & (sub_r <= 58) & (sub_b <= 42) & ((sub_g - sub_r) >= 55)
+        if int(np.count_nonzero(green_fletch)) >= max(6, int(round(9 * (ui_scale ** 2)))):
+            return "range"
+
+        # B. Protect from Magic ('mage'): bright red-orange blast core + yellow ring inside the beige circle
+        red_blast = (sub_r >= 195) & (sub_g <= 62) & (sub_b <= 38) & ((sub_r - sub_g) >= 140)
+        yellow_ring = (sub_r >= 205) & (sub_g >= 175) & (sub_b <= 45)
+        if (
+            int(np.count_nonzero(red_blast)) >= max(7, int(round(10 * (ui_scale ** 2))))
+            and int(np.count_nonzero(yellow_ring)) >= max(6, int(round(8 * (ui_scale ** 2))))
+        ):
+            return "mage"
+
+        # C. Protect from Melee ('melee'): neutral silver sword blade + bright yellow crossguard
+        silver_blade = (
+            (sub_r >= 105) & (sub_r <= 225)
+            & (np.abs(sub_r - sub_g) <= 14)
+            & (np.abs(sub_g - sub_b) <= 14)
+        )
+        if (
+            int(np.count_nonzero(silver_blade)) >= max(10, int(round(14 * (ui_scale ** 2))))
+            and int(np.count_nonzero(yellow_ring)) >= max(5, int(round(7 * (ui_scale ** 2))))
+        ):
+            return "melee"
+
+    return None
+
+
+def auto_overhead_watcher_loop():
+    """
+    Background loop that monitors the opponent's overhead protection prayer and automatically
+    switches your offensive gear/style (F1 Mage / F2 Range / F3 Melee) whenever the opponent
+    prays against your currently equipped style.
+    """
+    global auto_overhead_watching
+    last_seen_prayer = None
+    consecutive_count = 0
+    cooldown_until = 0.0
+
+    while auto_overhead_watching:
+        try:
+            now = time.time()
+            if now >= _combo_dwell_pause_until and now >= cooldown_until and not gmaul_armed:
+                detected = detect_enemy_overhead_prayer()
+                if detected is not None and detected == last_seen_prayer:
+                    consecutive_count += 1
+                else:
+                    last_seen_prayer = detected
+                    consecutive_count = 1 if detected is not None else 0
+
+                # Require 2 consecutive detections (~120ms apart) and only switch if opponent prays against our current style
+                if consecutive_count >= 2 and detected == current_equipped_style:
+                    consecutive_count = 0
+                    time.sleep(random.uniform(0.18, 0.28))
+                    if not auto_overhead_watching or time.time() < _combo_dwell_pause_until:
+                        continue
+                    if detected == "mage":
+                        print("[AutoStyle] Opponent praying Magic against our Mage -> switching to Range (F2)!")
+                        execute_f2_range_switch()
+                    elif detected == "range":
+                        print("[AutoStyle] Opponent praying Missiles against our Range -> switching to Mage (F1)!")
+                        execute_f1_mage_switch()
+                    elif detected == "melee":
+                        print("[AutoStyle] Opponent praying Melee against our Melee -> switching to Range (F2)!")
+                        execute_f2_range_switch()
+                    cooldown_until = time.time() + AUTO_STYLE_SWITCH_COOLDOWN
+        except Exception as exc:
+            print(f"[AutoStyle] Watcher error: {exc}")
+
+        time.sleep(OVERHEAD_POLL_INTERVAL)
+
+
+def toggle_auto_overhead_watcher(e):
+    """Toggle the Automatic Opponent Overhead Prayer -> Style Switcher on '`' (backtick/tilde) press."""
+    global auto_overhead_watching, auto_overhead_thread
+    if e.event_type == keyboard.KEY_DOWN:
+        if not auto_overhead_watching:
+            auto_overhead_watching = True
+            auto_overhead_thread = threading.Thread(target=auto_overhead_watcher_loop, daemon=True)
+            auto_overhead_thread.start()
+            print(
+                f"[AutoStyle] ARMED (current_style='{current_equipped_style}'). "
+                "Watching opponent overhead prayer to auto-switch F1/F2. Press '`' to disarm."
+            )
+        else:
+            auto_overhead_watching = False
+            print("[AutoStyle] DISARMED.")
     
 def fast_click_spot(area):
     """Click a spot with minimal hover delay so OSRS registers the cursor position before clicking."""
@@ -2028,8 +2242,12 @@ keyboard.on_press_key("f9", on_f9_press)
 keyboard.on_press_key("f10", on_f10_press)
 keyboard.on_press_key("f11", toggle_alarm_watcher)
 keyboard.on_press_key("f12", toggle_barrage_spell)
+keyboard.on_press_key("`", toggle_auto_overhead_watcher)
 keyboard.on_press_key("esc", on_esc_press)
-print("Listening for F1-F8, F9 (arm AGS->Gmaul on next click), Esc, F10 (refresh), F11 (PKer alarm), and F12 (Ice/Blood Barrage). Press Ctrl+C to exit.")
+print(
+    "Listening for F1-F8, F9 (AGS->Gmaul), ` (toggle Auto-Style Switch), Esc, "
+    "F10 (refresh), F11 (PKer alarm), and F12 (Ice/Blood Barrage). Press Ctrl+C to exit."
+)
 
 # Watch for RuneLite menu to appear on screen, then click Prayer tab and run full calibration
 threading.Thread(target=wait_for_menu_and_calibrate, daemon=True).start()
