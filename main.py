@@ -153,10 +153,10 @@ alarm_thread = None
 ALARM_POLL_INTERVAL = 0.025  # 25ms (~40 Hz, ~24 checks per OSRS tick)
 ALARM_COOLDOWN = 4.0         # Seconds to pause/disarm after triggering teleport
 
-# Active barrage spell selected on F1 ('ice_barrage' by default, toggled to 'blood_barrage' via F12)
+# Active barrage spell selected on Numpad 1 ('ice_barrage' by default, toggled to 'blood_barrage' via F12)
 active_barrage_spell = "ice_barrage"
 
-# Automatic opponent overhead prayer -> offensive style (F1/F2/F3) watcher state (toggled via '`')
+# Automatic opponent overhead prayer -> offensive style (Numpad 1/2/3) watcher state (toggled via '`')
 current_equipped_style = "range"
 auto_overhead_watching = False
 auto_overhead_thread = None
@@ -1049,7 +1049,7 @@ def activate_spec_orb():
 
 
 @timing_decorator
-def execute_f1_mage_switch():
+def execute_mage_switch():
     """Swap to Mage gear (Blue/Cyan tag), activate Augury, select active barrage spell (Ice/Blood), and restore cursor."""
     global _combo_dwell_pause_until, current_equipped_style
     _combo_dwell_pause_until = time.time() + 0.35
@@ -1075,24 +1075,24 @@ def execute_f1_mage_switch():
     pyautogui.moveTo(orig_x, orig_y, _pause=False)
 
 
-def on_f1_press(e):
-    """F1: Swap to Mage gear, activate Augury, select active barrage spell, and restore cursor."""
+def on_numpad1_press(e):
+    """Numpad 1: Swap to Mage gear, activate Augury, select active barrage spell, and restore cursor."""
     if e.event_type == keyboard.KEY_DOWN:
-        execute_f1_mage_switch()
+        execute_mage_switch()
 
 
 def toggle_barrage_spell(e):
-    """Toggle the spell selected by F1 between 'ice_barrage' and 'blood_barrage' on F12 press."""
+    """Toggle the spell selected by Numpad 1 between 'ice_barrage' and 'blood_barrage' on F12 press."""
     global active_barrage_spell
     if e.event_type == keyboard.KEY_DOWN:
         active_barrage_spell = (
             "blood_barrage" if active_barrage_spell == "ice_barrage" else "ice_barrage"
         )
-        print(f"[Magic] F1 barrage spell toggled to '{active_barrage_spell}'.")
+        print(f"[Magic] Numpad 1 barrage spell toggled to '{active_barrage_spell}'.")
 
 
 @timing_decorator
-def execute_f2_range_switch():
+def execute_range_switch():
     """Swap to Range gear (Green tag), activate Rigour, return to Inventory tab, and restore cursor."""
     global _combo_dwell_pause_until, current_equipped_style
     _combo_dwell_pause_until = time.time() + 0.35
@@ -1114,14 +1114,14 @@ def execute_f2_range_switch():
     pyautogui.moveTo(orig_x, orig_y, _pause=False)
 
 
-def on_f2_press(e):
-    """F2: Swap to Range gear, activate Rigour, return to Inventory tab, and restore cursor."""
+def on_numpad2_press(e):
+    """Numpad 2: Swap to Range gear, activate Rigour, return to Inventory tab, and restore cursor."""
     if e.event_type == keyboard.KEY_DOWN:
-        execute_f2_range_switch()
+        execute_range_switch()
 
 
 @timing_decorator
-def execute_f3_melee_switch():
+def execute_melee_switch():
     """Swap to Melee gear (Red tag), activate Piety, return to Inventory tab, and restore cursor."""
     global _combo_dwell_pause_until, current_equipped_style
     _combo_dwell_pause_until = time.time() + 0.35
@@ -1143,17 +1143,17 @@ def execute_f3_melee_switch():
     pyautogui.moveTo(orig_x, orig_y, _pause=False)
 
 
-def on_f3_press(e):
-    """F3: Swap to Melee gear, activate Piety, return to Inventory tab, and restore cursor."""
+def on_numpad3_press(e):
+    """Numpad 3: Swap to Melee gear, activate Piety, return to Inventory tab, and restore cursor."""
     if e.event_type == keyboard.KEY_DOWN:
-        execute_f3_melee_switch()
+        execute_melee_switch()
 
 
 @timing_decorator
 # @throttle
-def on_f4_press(e):
+def on_numpad0_press(e):
     """
-    F4: Swap to Melee gear (Red tag) + 1st Spec weapon (Magenta #FF00FF tag) last,
+    Numpad 0: Swap to Melee gear (Red tag) + 1st Spec weapon (Magenta #FF00FF tag) last,
     activate Piety, return to Inventory tab, click Spec Orb last (if not already active),
     and restore cursor to its original position.
     """
@@ -1260,7 +1260,8 @@ def activate_prayer(prayer_key):
 
 @timing_decorator
 # @throttle
-def on_f5_press(e):
+def on_numpad4_press(e):
+    """Numpad 4: Activate Protect from Magic + Augury, then return to Inventory tab."""
     global _combo_dwell_pause_until
     if e.event_type == keyboard.KEY_DOWN:
         _combo_dwell_pause_until = time.time() + 0.3
@@ -1272,7 +1273,8 @@ def on_f5_press(e):
 
 @timing_decorator
 # @throttle
-def on_f6_press(e):
+def on_numpad5_press(e):
+    """Numpad 5: Activate Protect from Missiles, then return to Inventory tab."""
     global _combo_dwell_pause_until
     if e.event_type == keyboard.KEY_DOWN:
         _combo_dwell_pause_until = time.time() + 0.3
@@ -1284,7 +1286,8 @@ def on_f6_press(e):
 
 @timing_decorator
 # @throttle
-def on_f7_press(e):
+def on_numpad6_press(e):
+    """Numpad 6: Activate Protect from Melee, then return to Inventory tab."""
     global _combo_dwell_pause_until
     if e.event_type == keyboard.KEY_DOWN:
         _combo_dwell_pause_until = time.time() + 0.3
@@ -1879,7 +1882,7 @@ def detect_enemy_overhead_prayer():
 def auto_overhead_watcher_loop():
     """
     Background loop that monitors the opponent's overhead protection prayer and automatically
-    switches your offensive gear/style (F1 Mage / F2 Range / F3 Melee) whenever the opponent
+    switches your offensive gear/style (Numpad 1 Mage / Numpad 2 Range / Numpad 3 Melee) whenever the opponent
     prays against your currently equipped style.
     """
     global auto_overhead_watching
@@ -1905,14 +1908,14 @@ def auto_overhead_watcher_loop():
                     if not auto_overhead_watching or time.time() < _combo_dwell_pause_until:
                         continue
                     if detected == "mage":
-                        print("[AutoStyle] Opponent praying Magic against our Mage -> switching to Range (F2)!")
-                        execute_f2_range_switch()
+                        print("[AutoStyle] Opponent praying Magic against our Mage -> switching to Range (Numpad 2)!")
+                        execute_range_switch()
                     elif detected == "range":
-                        print("[AutoStyle] Opponent praying Missiles against our Range -> switching to Mage (F1)!")
-                        execute_f1_mage_switch()
+                        print("[AutoStyle] Opponent praying Missiles against our Range -> switching to Mage (Numpad 1)!")
+                        execute_mage_switch()
                     elif detected == "melee":
-                        print("[AutoStyle] Opponent praying Melee against our Melee -> switching to Range (F2)!")
-                        execute_f2_range_switch()
+                        print("[AutoStyle] Opponent praying Melee against our Melee -> switching to Range (Numpad 2)!")
+                        execute_range_switch()
                     cooldown_until = time.time() + AUTO_STYLE_SWITCH_COOLDOWN
         except Exception as exc:
             print(f"[AutoStyle] Watcher error: {exc}")
@@ -1930,7 +1933,7 @@ def toggle_auto_overhead_watcher(e):
             auto_overhead_thread.start()
             print(
                 f"[AutoStyle] ARMED (current_style='{current_equipped_style}'). "
-                "Watching opponent overhead prayer to auto-switch F1/F2. Press '`' to disarm."
+                "Watching opponent overhead prayer to auto-switch Numpad 1/2. Press '`' to disarm."
             )
         else:
             auto_overhead_watching = False
@@ -2229,14 +2232,35 @@ def wait_for_menu_and_calibrate():
 # Load persisted areas if available
 load_areas_config()
 
-# Set up the listeners for F1-F12 and Esc keys immediately (zero startup delay)
-keyboard.on_press_key("f1", on_f1_press)
-keyboard.on_press_key("f2", on_f2_press)
-keyboard.on_press_key("f3", on_f3_press)
-keyboard.on_press_key("f4", on_f4_press)
-keyboard.on_press_key("f5", on_f5_press)
-keyboard.on_press_key("f6", on_f6_press)
-keyboard.on_press_key("f7", on_f7_press)
+# Physical Windows Numpad scan codes (coupled with e.is_keypad check so top-row numbers & arrow/nav keys never trigger)
+NUMPAD_SCAN_CODES = {
+    "numpad 0": 82,
+    "numpad 1": 79,
+    "numpad 2": 80,
+    "numpad 3": 81,
+    "numpad 4": 75,
+    "numpad 5": 76,
+    "numpad 6": 77,
+}
+
+
+def bind_numpad_key(numpad_name, callback):
+    """Bind strictly to a physical Numpad key (works with NumLock ON or OFF; ignores top-row digits and arrow keys)."""
+    scan_code = NUMPAD_SCAN_CODES[numpad_name]
+    return keyboard.on_press_key(
+        scan_code,
+        lambda e: callback(e) if getattr(e, "is_keypad", False) else None,
+    )
+
+
+# Set up the listeners for Numpad 0-6, F8-F12, `, and Esc keys immediately (zero startup delay)
+bind_numpad_key("numpad 0", on_numpad0_press)
+bind_numpad_key("numpad 1", on_numpad1_press)
+bind_numpad_key("numpad 2", on_numpad2_press)
+bind_numpad_key("numpad 3", on_numpad3_press)
+bind_numpad_key("numpad 4", on_numpad4_press)
+bind_numpad_key("numpad 5", on_numpad5_press)
+bind_numpad_key("numpad 6", on_numpad6_press)
 keyboard.on_press_key("f8", on_f8_press)
 keyboard.on_press_key("f9", on_f9_press)
 keyboard.on_press_key("f10", on_f10_press)
@@ -2245,7 +2269,8 @@ keyboard.on_press_key("f12", toggle_barrage_spell)
 keyboard.on_press_key("`", toggle_auto_overhead_watcher)
 keyboard.on_press_key("esc", on_esc_press)
 print(
-    "Listening for F1-F8, F9 (AGS->Gmaul), ` (toggle Auto-Style Switch), Esc, "
+    "Listening for Numpad 0 (Melee+Spec), Numpad 1-3 (Mage/Range/Melee), Numpad 4-6 (Prot Mage/Range/Melee), "
+    "F8 (Combo Eat), F9 (AGS->Gmaul), ` (Auto-Style Switch), Esc, "
     "F10 (refresh), F11 (PKer alarm), and F12 (Ice/Blood Barrage). Press Ctrl+C to exit."
 )
 
