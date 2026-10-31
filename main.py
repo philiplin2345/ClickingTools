@@ -20,10 +20,10 @@ BASELINE_ORIGIN = (1888, 1101)
 
 # Previous area definitions remain the same (used as 1.0x reference baseline)
 BASELINE_CLICKING_AREAS = {
-    "inventory_tag": (1957, 873, 1984, 906),
-    "last_inventory_spot": (2048, 1267, 2072, 1290),
-    "prayer_tag": (2056, 874, 2083, 909),
-    "magic_tag": (2105, 876, 2136, 905),
+    "inventory_tag": (1948, 874, 1976, 906),
+    "last_inventory_spot": (2046, 1267, 2070, 1291),
+    "prayer_tag": (2048, 874, 2076, 906),
+    "magic_tag": (2097, 874, 2125, 906),
     "spec": (1931, 251, 1952, 272),
     "prot_mage": (1888, 1101, 1927, 1143),
     "prot_range": (1946, 1106, 1983, 1143),
@@ -70,6 +70,7 @@ GMAUL_TEMPLATE_PATH = "images/granite_maul.png"
 COMBO_FOOD_TEMPLATES = {
     "hard_food": [
         ("shark", "images/shark.png", 1),
+        ("anglerfish", "images/anglerfish.png", 1),
         ("blighted_manta_ray", "images/blighted_manta_ray.png", 1),
         ("blighted_anglerfish", "images/blighted_anglerfish.png", 1),
     ],
@@ -100,16 +101,16 @@ BASELINE_SEARCHING_AREAS = {
     "magic_panel": (1820, 920, 2110, 1290),
     "inventory_panel": (1842, 928, 2088, 1304),
     "inventory": (1835, 920, 2100, 1050),
-    "hp_bar": (1801, 927, 1813, 1300),
+    "hp_bar": (1800, 927, 1812, 1300),
     "alarm_patch": (1600, 920, 1640, 960)
 }
 
 # Reference templates and their top-left offset (dx, dy) from BASELINE_ORIGIN at 1.0x scale.
 # Tab stones are listed FIRST because at least 2 of the 3 are always unselected/visible regardless of which tab is open.
 ANCHOR_TEMPLATES = [
-    ("prayer_tag", os.path.join(ANCHORS_DIR, "prayer_tag.png"), (166, -227)),
-    ("inventory_tag", os.path.join(ANCHORS_DIR, "inventory_tag.png"), (67, -227)),
-    ("magic_tag", os.path.join(ANCHORS_DIR, "magic_tag.png"), (215, -224)),
+    ("prayer_tag", os.path.join(ANCHORS_DIR, "prayer_tag.png"), (160, -227)),
+    ("inventory_tag", os.path.join(ANCHORS_DIR, "inventory_tag.png"), (60, -227)),
+    ("magic_tag", os.path.join(ANCHORS_DIR, "magic_tag.png"), (209, -227)),
     ("prot_mage", "images/protect_from_mage.png", (0, 0)),
     ("prot_range", "images/protect_from_range.png", (58, 5)),
     ("prot_melee", "images/protect_from_melee.png", (110, -2)),
@@ -436,20 +437,37 @@ def refresh_areas(open_prayer_tab=False):
     matched_anchors = {}
     fast_scales = [ui_scale] if ui_scale == 1.0 else [ui_scale, 1.0]
 
-    # Pass 1: Fast check at [ui_scale, 1.0] (avoids 25-scale full-screen search when Prayer tab is closed!)
+    # Pass 1: Fast check at [ui_scale, 1.0] using immutable 1.0x reference icons
     for name, path, offset in ANCHOR_TEMPLATES:
         # On startup (open_prayer_tab=False), once 2 tab stones match, skip checking prayer icons
         if not open_prayer_tab and len(matched_anchors) >= 2 and name in ("prot_mage", "prot_range", "prot_melee"):
             continue
-        anchor_override = os.path.join(ANCHORS_DIR, f"{name}.png")
-        candidate_paths = [anchor_override, path] if anchor_override != path else [path]
-        for cpath in candidate_paths:
-            if not os.path.exists(cpath):
+        if not os.path.exists(path):
+            continue
+        tmpl = cv2.imread(path, 0)
+        if tmpl is None:
+            continue
+        match = match_template_multiscale(screen_gray, tmpl, scales=fast_scales, threshold=0.80)
+        if match is not None:
+            val, loc, scale_est, size = match
+            matched_anchors[name] = {
+                "val": val,
+                "loc": loc,
+                "scale": scale_est,
+                "size": size,
+                "offset": offset,
+            }
+            print(f"  -> Matched '{name}' at {loc} (confidence={val:.3f}, scale={scale_est:.2f})")
+
+    # Pass 2: Full 25-scale fallback only if Pass 1 found nothing (e.g. UI scale changed)
+    if not matched_anchors:
+        for name, path, offset in ANCHOR_TEMPLATES:
+            if not os.path.exists(path):
                 continue
-            tmpl = cv2.imread(cpath, 0)
+            tmpl = cv2.imread(path, 0)
             if tmpl is None:
                 continue
-            match = match_template_multiscale(screen_gray, tmpl, scales=fast_scales, threshold=0.78)
+            match = match_template_multiscale(screen_gray, tmpl, threshold=0.80)
             if match is not None:
                 val, loc, scale_est, size = match
                 matched_anchors[name] = {
@@ -460,31 +478,6 @@ def refresh_areas(open_prayer_tab=False):
                     "offset": offset,
                 }
                 print(f"  -> Matched '{name}' at {loc} (confidence={val:.3f}, scale={scale_est:.2f})")
-                break
-
-    # Pass 2: Full 25-scale fallback only if Pass 1 found nothing (e.g. UI scale changed)
-    if not matched_anchors:
-        for name, path, offset in ANCHOR_TEMPLATES:
-            anchor_override = os.path.join(ANCHORS_DIR, f"{name}.png")
-            candidate_paths = [anchor_override, path] if anchor_override != path else [path]
-            for cpath in candidate_paths:
-                if not os.path.exists(cpath):
-                    continue
-                tmpl = cv2.imread(cpath, 0)
-                if tmpl is None:
-                    continue
-                match = match_template_multiscale(screen_gray, tmpl, threshold=0.78)
-                if match is not None:
-                    val, loc, scale_est, size = match
-                    matched_anchors[name] = {
-                        "val": val,
-                        "loc": loc,
-                        "scale": scale_est,
-                        "size": size,
-                        "offset": offset,
-                    }
-                    print(f"  -> Matched '{name}' at {loc} (confidence={val:.3f}, scale={scale_est:.2f})")
-                    break
 
     if not matched_anchors:
         print(
@@ -501,7 +494,10 @@ def refresh_areas(open_prayer_tab=False):
         else list(matched_anchors.values())
     )
 
-    ui_scale = float(np.median([m["scale"] for m in ref_anchors]))
+    new_scale = float(np.median([m["scale"] for m in ref_anchors]))
+    if new_scale != ui_scale:
+        ui_scale = new_scale
+        _template_cache.clear()
     origin_x = float(np.median([m["loc"][0] - m["offset"][0] * ui_scale for m in ref_anchors]))
     origin_y = float(np.median([m["loc"][1] - m["offset"][1] * ui_scale for m in ref_anchors]))
 
@@ -524,12 +520,6 @@ def refresh_areas(open_prayer_tab=False):
 
     # If Prayer tab is not currently open during F10 calibration (or if any prayer anchor is missing), open it briefly
     if len(prayer_keys) < 2 and (open_prayer_tab or missing_prayer_anchors):
-        # While Prayer tab is closed, crop a clean unselected prayer_tag anchor
-        px1, py1, px2, py2 = clicking_areas["prayer_tag"]
-        p_crop = screen_bgr[py1:py2, px1:px2]
-        if p_crop.size > 0:
-            cv2.imwrite(os.path.join(ANCHORS_DIR, "prayer_tag.png"), p_crop)
-
         print("  -> Opening Prayer tab briefly to calibrate exact prayer icon positions...")
         fast_click_spot(clicking_areas["prayer_tag"])
         time.sleep(0.15)
@@ -565,15 +555,6 @@ def refresh_areas(open_prayer_tab=False):
                 clicking_areas[prayer_key] = (abs_x1, abs_y1, abs_x2, abs_y2)
                 matched_prayers_count += 1
 
-                # Also update BASELINE_CLICKING_AREAS so future non-Prayer-tab scans preserve this slot
-                ox, oy = BASELINE_ORIGIN
-                BASELINE_CLICKING_AREAS[prayer_key] = (
-                    int(round(ox + (abs_x1 - origin_x) / ui_scale)),
-                    int(round(oy + (abs_y1 - origin_y) / ui_scale)),
-                    int(round(ox + (abs_x2 - origin_x) / ui_scale)),
-                    int(round(oy + (abs_y2 - origin_y) / ui_scale)),
-                )
-
                 # Tighten runtime searching_areas[prayer_key] to just the icon size (+2px margin) for fastest matching
                 pad = max(2, int(round(2 * ui_scale)))
                 searching_areas[prayer_key] = (
@@ -589,21 +570,6 @@ def refresh_areas(open_prayer_tab=False):
                     cv2.imwrite(os.path.join(ANCHORS_DIR, f"{prayer_key}.png"), auto_trim_crop(icon_crop, margin=1))
 
                 print(f"  -> Calibrated prayer '{prayer_key}' box={clicking_areas[prayer_key]} search={searching_areas[prayer_key]} (conf={pval:.3f})")
-
-    # While Prayer tab is open, save clean unselected crops for inventory_tag and magic_tag
-    if len(prayer_keys) >= 2 or matched_prayers_count >= 2:
-        for tab_key in ("inventory_tag", "magic_tag"):
-            tx1, ty1, tx2, ty2 = clicking_areas[tab_key]
-            crop = screen_bgr[ty1:ty2, tx1:tx2]
-            if crop.size > 0:
-                cv2.imwrite(os.path.join(ANCHORS_DIR, f"{tab_key}.png"), crop)
-        # Also save prayer_tag if it doesn't exist yet
-        prayer_tag_path = os.path.join(ANCHORS_DIR, "prayer_tag.png")
-        if not os.path.exists(prayer_tag_path):
-            tx1, ty1, tx2, ty2 = clicking_areas["prayer_tag"]
-            crop = screen_bgr[ty1:ty2, tx1:tx2]
-            if crop.size > 0:
-                cv2.imwrite(prayer_tag_path, crop)
 
     # Calibrate spells in SPELL_TEMPLATES (e.g. ice_barrage) during F10 or if magic tab is open
     missing_spell_anchors = any(
@@ -900,10 +866,11 @@ def equip_tagged_gear(style, append_first_spec=False):
     Also uses the captured inventory screenshot in the background to refresh the combo-eat slot cache.
     """
     slots = get_inventory_slot_boxes(zigzag=True, detect_hw_base=27, detect_hh_base=25)
-    ux1 = min(s[2][0] for s in slots)
-    uy1 = min(s[2][1] for s in slots)
-    ux2 = max(s[2][2] for s in slots)
-    uy2 = max(s[2][3] for s in slots)
+    inv_pad = max(14, int(round(18 * ui_scale)))
+    ux1 = max(0, min(s[2][0] for s in slots) - inv_pad)
+    uy1 = max(0, min(s[2][1] for s in slots) - inv_pad)
+    ux2 = max(s[2][2] for s in slots) + inv_pad
+    uy2 = max(s[2][3] for s in slots) + inv_pad
 
     shot = pyautogui.screenshot(region=(ux1, uy1, ux2 - ux1, uy2 - uy1))
     inv_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
@@ -911,7 +878,7 @@ def equip_tagged_gear(style, append_first_spec=False):
     # Refresh the combo-eat slot cache asynchronously using this inventory screenshot
     threading.Thread(
         target=update_combo_eat_cache_from_bgr,
-        args=(inv_bgr.copy(), ux1, uy1),
+        args=(inv_bgr.copy(), ux1, uy1, True),
         daemon=True,
     ).start()
 
@@ -1316,6 +1283,11 @@ _cached_gmaul_box = None
 gmaul_armed = False
 _gmaul_core_tmpl = None
 
+# Toggleable 7x4 inventory detection debug map state (toggled via F7)
+debug_inventory_detection = False
+_debug_inv_force_once = False
+_debug_inv_last_print_time = 0.0
+
 
 def _get_gmaul_templates():
     """
@@ -1438,54 +1410,235 @@ def classify_combo_eat_slot(slot_bgr, threshold=0.82):
     return None
 
 
-def update_combo_eat_cache_from_bgr(inv_bgr, ux1, uy1):
-    """
-    Scan all 28 inventory slots from a captured inventory BGR image and update _combo_eat_cache
-    as well as _cached_gmaul_box.
-    If no food/brew/karambwan is visible (e.g. Prayer or Magic tab is currently open),
-    preserves the existing cached inventory layout.
-    """
-    global _combo_cache_initialized, _cached_gmaul_box
-    slots = get_inventory_slot_boxes(zigzag=False, detect_hw_base=27, detect_hh_base=25)
-    new_queues = {"hard_food": [], "brew": [], "karambwan": []}
-    total_found = 0
+def has_cached_combo_food():
+    """Return True if at least one hard_food, brew, or karambwan is currently in _combo_eat_cache."""
+    with _combo_cache_lock:
+        return any(bool(_combo_eat_cache.get(cat)) for cat in ("hard_food", "brew", "karambwan"))
 
-    for row, col, (dx1, dy1, dx2, dy2), click_box in slots:
-        slot_bgr = inv_bgr[dy1 - uy1:dy2 - uy1, dx1 - ux1:dx2 - ux1]
-        match = classify_combo_eat_slot(slot_bgr)
-        if match is not None:
-            cat, item_name, doses, _ = match
-            new_queues[cat].append([row, col, click_box, item_name, doses])
-            total_found += 1
+
+def _short_item_label(item_name):
+    return (
+        item_name.replace("saradomin_", "")
+        .replace("blighted_", "bl_")
+        .replace("anglerfish", "angler")
+        .replace("manta_ray", "manta")
+        .replace("karambwan", "karamb")
+    )
+
+
+def update_combo_eat_cache_from_bgr(inv_bgr, ux1, uy1, inventory_open=False, current_hp=None, threshold=0.80):
+    """
+    Match all food/brew/karambwan templates across the FULL padded inventory BGR image (preventing
+    wide items like Shark and Karambwan from ever being clipped by shifted slot borders), map each
+    match back to (row, col), and center its click_box on the true matched sprite center.
+    Also prints a 7x4 visual inventory detection map when debug_inventory_detection (F7) is enabled.
+    """
+    global _combo_cache_initialized, _cached_gmaul_box, _debug_inv_force_once, _debug_inv_last_print_time
+    if inv_bgr is None or inv_bgr.size == 0:
+        return 0
+
+    ih, iw = inv_bgr.shape[:2]
+    lx1, ly1, lx2, ly2 = clicking_areas["last_inventory_spot"]
+    col3_cx = (lx1 + lx2) / 2.0
+    row6_cy = (ly1 + ly2) / 2.0
+    step_x = 63.0 * ui_scale
+    step_y = 54.0 * ui_scale
+    col0_cx = col3_cx - 3.0 * step_x
+    row0_cy = row6_cy - 6.0 * step_y
+
+    tol_x = max(16, int(round(24 * ui_scale)))
+    tol_y = max(14, int(round(20 * ui_scale)))
+    click_hw = max(6, int(round(11 * ui_scale)))
+    click_hh = max(6, int(round(10 * ui_scale)))
+
+    # Best match above threshold per (row, col): (val, cat, item_name, doses, click_box)
+    slot_matches = {}
+    # Best sub-threshold score per (row, col) for debug visibility: (val, item_name)
+    slot_sub_best = {}
+
+    for category, tmpl_list in COMBO_FOOD_TEMPLATES.items():
+        for item_name, tmpl_path, doses in tmpl_list:
+            tmpl = get_cached_template(tmpl_path, color=True)
+            if tmpl is None:
+                continue
+            th, tw = tmpl.shape[:2]
+            if ih < th or iw < tw:
+                continue
+            res = cv2.matchTemplate(inv_bgr, tmpl, cv2.TM_CCOEFF_NORMED)
+            rh, rw = res.shape[:2]
+
+            for row in range(7):
+                exp_cy = (row0_cy + row * step_y) - uy1
+                exp_ly = int(round(exp_cy - th / 2.0))
+                ry1 = max(0, exp_ly - tol_y)
+                ry2 = min(rh, exp_ly + tol_y + 1)
+                if ry1 >= ry2:
+                    continue
+                for col in range(4):
+                    exp_cx = (col0_cx + col * step_x) - ux1
+                    exp_lx = int(round(exp_cx - tw / 2.0))
+                    rx1 = max(0, exp_lx - tol_x)
+                    rx2 = min(rw, exp_lx + tol_x + 1)
+                    if rx1 >= rx2:
+                        continue
+
+                    sub = res[ry1:ry2, rx1:rx2]
+                    _, max_val, _, max_loc = cv2.minMaxLoc(sub)
+
+                    # Reject non-yellow potions (Super Restore, Ranging, Super Combat) from matching Saradomin Brew
+                    # Inspect only the lower 2/3 of the bottle (below the tan cork) for bright yellow brew liquid
+                    if category == "brew" and max_val >= 0.45:
+                        bx1 = rx1 + max_loc[0]
+                        by1 = ry1 + max_loc[1]
+                        bottle_bgr = inv_bgr[by1 + th // 3:by1 + th, bx1:bx1 + tw]
+                        pb = bottle_bgr[:, :, 0].astype(np.int16)
+                        pg = bottle_bgr[:, :, 1].astype(np.int16)
+                        pr = bottle_bgr[:, :, 2].astype(np.int16)
+                        yellow_px = (pr >= 155) & (pg >= 155) & (pb <= 110) & ((pr - pb) >= 65) & (np.abs(pr - pg) <= 45)
+                        min_y_px = max(16, int(round((26 if doses == 1 else 55) * (ui_scale ** 2))))
+                        if int(np.count_nonzero(yellow_px)) < min_y_px:
+                            continue
+
+                    prev_sub = slot_sub_best.get((row, col))
+                    if prev_sub is None or max_val > prev_sub[0]:
+                        slot_sub_best[(row, col)] = (max_val, item_name)
+
+                    if max_val >= threshold:
+                        prev = slot_matches.get((row, col))
+                        if prev is None or max_val > prev[0]:
+                            true_cx = int(round(ux1 + rx1 + max_loc[0] + tw / 2.0))
+                            true_cy = int(round(uy1 + ry1 + max_loc[1] + th / 2.0))
+                            cbox = (
+                                max(0, true_cx - click_hw),
+                                max(0, true_cy - click_hh),
+                                true_cx + click_hw,
+                                true_cy + click_hh,
+                            )
+                            slot_matches[(row, col)] = (max_val, category, item_name, doses, cbox)
+
+    new_queues = {"hard_food": [], "brew": [], "karambwan": []}
+    for row in range(7):
+        for col in range(4):
+            m = slot_matches.get((row, col))
+            if m is not None:
+                _, cat, item_name, doses, cbox = m
+                new_queues[cat].append([row, col, cbox, item_name, doses])
+
+    total_found = sum(len(q) for q in new_queues.values())
 
     gmaul_box = _find_gmaul_box_in_bgr(inv_bgr, ux1, uy1)
     if gmaul_box is not None:
         with _combo_cache_lock:
             _cached_gmaul_box = gmaul_box
 
-    if total_found > 0:
+    if total_found > 0 or inventory_open:
         with _combo_cache_lock:
             for cat in ("hard_food", "brew", "karambwan"):
                 _combo_eat_cache[cat] = new_queues[cat]
             _combo_cache_initialized = True
+
+    # Print 7x4 inventory detection debug map when toggled ON (F7)
+    now = time.time()
+    if debug_inventory_detection and (_debug_inv_force_once or (now - _debug_inv_last_print_time) >= 1.5):
+        _debug_inv_force_once = False
+        _debug_inv_last_print_time = now
+
+        gmaul_rc = None
+        if gmaul_box is not None:
+            gcx = (gmaul_box[0] + gmaul_box[2]) / 2.0
+            gcy = (gmaul_box[1] + gmaul_box[3]) / 2.0
+            gc = int(round((gcx - col0_cx) / step_x))
+            gr = int(round((gcy - row0_cy) / step_y))
+            if 0 <= gr < 7 and 0 <= gc < 4:
+                gmaul_rc = (gr, gc)
+
+        slots_grid = {(r, c): dbox for r, c, dbox, _ in get_inventory_slot_boxes(zigzag=False, detect_hw_base=25, detect_hh_base=23)}
+        hp_str = f"{current_hp:.1f}" if current_hp is not None else "N/A"
+        lines = [
+            f"\n==================== [InvDebug] 7x4 Inventory Map (HP={hp_str}, inv_open={inventory_open}) ===================="
+        ]
+        for row in range(7):
+            cells = []
+            for col in range(4):
+                m = slot_matches.get((row, col))
+                if m is not None:
+                    val, _, iname, _, _ = m
+                    cell = f"{_short_item_label(iname)}:{val:.2f}"
+                elif gmaul_rc == (row, col):
+                    cell = "gmaul"
+                else:
+                    dx1, dy1, dx2, dy2 = slots_grid[(row, col)]
+                    sy1 = max(0, dy1 - uy1)
+                    sy2 = min(ih, dy2 - uy1)
+                    sx1 = max(0, dx1 - ux1)
+                    sx2 = min(iw, dx2 - ux1)
+                    s_bgr = inv_bgr[sy1:sy2, sx1:sx2]
+                    tag_found = None
+                    for st in ("mage", "range", "melee", "spec"):
+                        if is_slot_tagged_color(s_bgr, st):
+                            tag_found = st
+                            break
+                    if tag_found is not None:
+                        cell = f"[tag:{tag_found}]"
+                    else:
+                        # Check if slot is non-empty brown stone
+                        sb = s_bgr[:, :, 0].astype(np.int16)
+                        sg = s_bgr[:, :, 1].astype(np.int16)
+                        sr = s_bgr[:, :, 2].astype(np.int16)
+                        fg = int(np.count_nonzero((np.abs(sb - 41) > 15) | (np.abs(sg - 53) > 15) | (np.abs(sr - 62) > 15)))
+                        sub_info = slot_sub_best.get((row, col))
+                        if fg >= max(40, int(round(80 * (ui_scale ** 2)))) and sub_info and sub_info[0] >= 0.45:
+                            cell = f"?{_short_item_label(sub_info[1])}:{sub_info[0]:.2f}"
+                        else:
+                            cell = "."
+                cells.append(f"{cell:<14}")
+            lines.append(f"  Row {row}: | " + " | ".join(cells) + " |")
+
+        with _combo_cache_lock:
+            hf_n = len(_combo_eat_cache.get("hard_food", []))
+            br_n = len(_combo_eat_cache.get("brew", []))
+            ka_n = len(_combo_eat_cache.get("karambwan", []))
+        lines.append(
+            f"  Cached Queues -> hard_food: {hf_n} | brew: {br_n} | karambwan: {ka_n} | gmaul: {gmaul_box}"
+        )
+        lines.append("=" * 92)
+        print("\n".join(lines))
+
     return total_found
+
+
+def toggle_inventory_debug(e):
+    """F7: Toggle the live 7x4 inventory detection debug printout ON/OFF."""
+    global debug_inventory_detection, _debug_inv_force_once
+    if e.event_type == keyboard.KEY_DOWN:
+        debug_inventory_detection = not debug_inventory_detection
+        if debug_inventory_detection:
+            _debug_inv_force_once = True
+            print("[InvDebug] Inventory detection debug ENABLED (printing every 1.5s; press F7 to disable).")
+            threading.Thread(
+                target=refresh_combo_eat_cache_now,
+                kwargs={"check_auto_eat": True},
+                daemon=True,
+            ).start()
+        else:
+            print("[InvDebug] Inventory detection debug DISABLED.")
 
 
 def _get_hp_bar_box():
     """
     Return the (x1, y1, x2, y2) bounding box of the left-pillar RuneLite HP status bar,
-    derived directly from clicking_areas['prot_mage'] (which is at offset (-87..-75, -174..+199)).
+    derived directly from clicking_areas['inventory_tag'] (offset (-148..-136, +53..+426) at 1.0x scale).
     """
-    pm = clicking_areas.get("prot_mage")
-    if isinstance(pm, tuple) and len(pm) == 4:
-        ox, oy = pm[0], pm[1]
+    it = clicking_areas.get("inventory_tag")
+    if isinstance(it, tuple) and len(it) == 4:
+        ix, iy = it[0], it[1]
         return (
-            max(0, int(round(ox - 87 * ui_scale))),
-            max(0, int(round(oy - 174 * ui_scale))),
-            max(1, int(round(ox - 75 * ui_scale))),
-            max(1, int(round(oy + 199 * ui_scale))),
+            max(0, int(round(ix - 148 * ui_scale))),
+            max(0, int(round(iy + 53 * ui_scale))),
+            max(1, int(round(ix - 136 * ui_scale))),
+            max(1, int(round(iy + 426 * ui_scale))),
         )
-    return searching_areas.get("hp_bar", (1801, 927, 1813, 1300))
+    return searching_areas.get("hp_bar", (1800, 927, 1812, 1300))
 
 
 def read_hp_from_bar(strip_bgr):
@@ -1525,33 +1678,72 @@ def read_hp_from_bar(strip_bgr):
     return round(99.0 * filled_height / float(h), 1)
 
 
-def refresh_combo_eat_cache_now(check_auto_eat=False):
+def _is_inventory_tab_selected_in_bgr(full_bgr, ux1, uy1):
     """
-    Capture the left-pillar HP bar + 28-slot inventory region in a SINGLE screenshot,
+    Check if the Inventory tab is currently selected by inspecting the stone background strips
+    on the left and right edges of clicking_areas['inventory_tag'] (outside the brown backpack icon).
+    Unselected stone is neutral grey (B>=45, R-B<=16); selected stone is crimson red (B<=32, R-B>=22).
+    """
+    tag_box = clicking_areas.get("inventory_tag")
+    if not (isinstance(tag_box, tuple) and len(tag_box) == 4):
+        return False
+    pad_x = max(5, int(round(8 * ui_scale)))
+    sx1 = max(ux1, tag_box[0] - pad_x)
+    sy1 = max(uy1, tag_box[1] + 4)
+    sx2 = min(ux1 + full_bgr.shape[1], tag_box[2] + pad_x)
+    sy2 = min(uy1 + full_bgr.shape[0], tag_box[3] - 4)
+    patch = full_bgr[sy1 - uy1:sy2 - uy1, sx1 - ux1:sx2 - ux1]
+    if patch.size == 0 or patch.shape[0] < 8 or patch.shape[1] < pad_x * 2 + 4:
+        return False
+    edges = np.concatenate([patch[:, :pad_x, :], patch[:, -pad_x:, :]], axis=1)
+    b = edges[:, :, 0].astype(np.int16)
+    r = edges[:, :, 2].astype(np.int16)
+    crimson_stone = (r >= 45) & (b <= 34) & ((r - b) >= 22)
+    return float(np.mean(crimson_stone)) >= 0.45
+
+
+def refresh_combo_eat_cache_now(check_auto_eat=False, force_inventory_open=False):
+    """
+    Capture the left-pillar HP bar + inventory tab stone + padded 28-slot inventory region in a SINGLE screenshot,
     update the pre-cached combo-eat queues, and optionally return the current HP reading.
     """
     slots = get_inventory_slot_boxes(zigzag=False, detect_hw_base=27, detect_hh_base=25)
-    inv_x1 = min(s[2][0] for s in slots)
-    inv_y1 = min(s[2][1] for s in slots)
-    inv_x2 = max(s[2][2] for s in slots)
-    inv_y2 = max(s[2][3] for s in slots)
+    inv_pad = max(14, int(round(18 * ui_scale)))
+    inv_x1 = max(0, min(s[2][0] for s in slots) - inv_pad)
+    inv_y1 = max(0, min(s[2][1] for s in slots) - inv_pad)
+    inv_x2 = max(s[2][2] for s in slots) + inv_pad
+    inv_y2 = max(s[2][3] for s in slots) + inv_pad
 
     hx1, hy1, hx2, hy2 = _get_hp_bar_box()
-    ux1 = min(inv_x1, hx1) if check_auto_eat else inv_x1
-    uy1 = min(inv_y1, hy1) if check_auto_eat else inv_y1
-    ux2 = max(inv_x2, hx2) if check_auto_eat else inv_x2
-    uy2 = max(inv_y2, hy2) if check_auto_eat else inv_y2
+    tag_box = clicking_areas.get("inventory_tag", (inv_x1, inv_y1, inv_x2, inv_y2))
+    pad = max(4, int(round(6 * ui_scale)))
+
+    if check_auto_eat:
+        ux1 = min(inv_x1, hx1, max(0, tag_box[0] - pad))
+        uy1 = min(inv_y1, hy1, max(0, tag_box[1] - pad))
+        ux2 = max(inv_x2, hx2, tag_box[2] + pad)
+        uy2 = max(inv_y2, hy2, tag_box[3] + pad)
+    else:
+        ux1, uy1, ux2, uy2 = inv_x1, inv_y1, inv_x2, inv_y2
 
     shot = pyautogui.screenshot(region=(ux1, uy1, ux2 - ux1, uy2 - uy1))
     full_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
 
-    inv_bgr = full_bgr[inv_y1 - uy1:inv_y2 - uy1, inv_x1 - ux1:inv_x2 - ux1]
-    update_combo_eat_cache_from_bgr(inv_bgr, inv_x1, inv_y1)
-
+    current_hp = None
     if check_auto_eat:
         hp_strip = full_bgr[hy1 - uy1:hy2 - uy1, hx1 - ux1:hx2 - ux1]
-        return read_hp_from_bar(hp_strip)
-    return None
+        current_hp = read_hp_from_bar(hp_strip)
+
+    is_inv_open = force_inventory_open or (
+        current_hp is not None and _is_inventory_tab_selected_in_bgr(full_bgr, ux1, uy1)
+    )
+
+    inv_bgr = full_bgr[inv_y1 - uy1:inv_y2 - uy1, inv_x1 - ux1:inv_x2 - ux1]
+    update_combo_eat_cache_from_bgr(
+        inv_bgr, inv_x1, inv_y1, inventory_open=is_inv_open, current_hp=current_hp
+    )
+
+    return current_hp
 
 
 def inventory_dwell_watcher_loop():
@@ -1570,6 +1762,7 @@ def inventory_dwell_watcher_loop():
                     current_hp is not None
                     and 0.0 < current_hp < AUTO_EAT_HP_THRESHOLD
                     and time.time() >= _auto_eat_cooldown_until
+                    and (has_cached_combo_food() or not _combo_cache_initialized)
                 ):
                     _auto_eat_cooldown_until = time.time() + AUTO_EAT_COOLDOWN
                     orig_x, orig_y = pyautogui.position()
@@ -1612,16 +1805,22 @@ def combo_eat():
       4. Click cached Karambwan
     """
     global _combo_dwell_pause_until
+
+    # Do not even click the Inventory tab if the cache is already initialized and empty
+    if _combo_cache_initialized and not has_cached_combo_food():
+        print("[ComboEat] No cached food, brew, or karambwan remaining — skipping.")
+        return 0
+
     # Pause background dwell scanner briefly while clicking + 1 tick (0.6s) so consumed slots update cleanly
     _combo_dwell_pause_until = time.time() + 0.65
 
     # Open Inventory tab immediately
     fast_click_spot(clicking_areas["inventory_tag"])
 
-    # Fallback only if F8 is pressed before the background dwell scanner has ever seen the inventory
+    # Fallback only if F8/AutoEat runs before the background dwell scanner has ever seen the inventory
     if not _combo_cache_initialized:
         time.sleep(random.uniform(0.05, 0.065))
-        refresh_combo_eat_cache_now()
+        refresh_combo_eat_cache_now(force_inventory_open=True)
     else:
         time.sleep(random.uniform(0.012, 0.02))
 
@@ -2253,7 +2452,7 @@ def bind_numpad_key(numpad_name, callback):
     )
 
 
-# Set up the listeners for Numpad 0-6, F8-F12, `, and Esc keys immediately (zero startup delay)
+# Set up the listeners for Numpad 0-6, F7-F12, `, and Esc keys immediately (zero startup delay)
 bind_numpad_key("numpad 0", on_numpad0_press)
 bind_numpad_key("numpad 1", on_numpad1_press)
 bind_numpad_key("numpad 2", on_numpad2_press)
@@ -2261,6 +2460,7 @@ bind_numpad_key("numpad 3", on_numpad3_press)
 bind_numpad_key("numpad 4", on_numpad4_press)
 bind_numpad_key("numpad 5", on_numpad5_press)
 bind_numpad_key("numpad 6", on_numpad6_press)
+keyboard.on_press_key("f7", toggle_inventory_debug)
 keyboard.on_press_key("f8", on_f8_press)
 keyboard.on_press_key("f9", on_f9_press)
 keyboard.on_press_key("f10", on_f10_press)
@@ -2270,7 +2470,7 @@ keyboard.on_press_key("`", toggle_auto_overhead_watcher)
 keyboard.on_press_key("esc", on_esc_press)
 print(
     "Listening for Numpad 0 (Melee+Spec), Numpad 1-3 (Mage/Range/Melee), Numpad 4-6 (Prot Mage/Range/Melee), "
-    "F8 (Combo Eat), F9 (AGS->Gmaul), ` (Auto-Style Switch), Esc, "
+    "F7 (Inv Debug), F8 (Combo Eat), F9 (AGS->Gmaul), ` (Auto-Style Switch), Esc, "
     "F10 (refresh), F11 (PKer alarm), and F12 (Ice/Blood Barrage). Press Ctrl+C to exit."
 )
 
