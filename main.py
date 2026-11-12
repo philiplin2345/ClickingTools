@@ -11,6 +11,7 @@ import os
 from threading import Lock
 import threading
 from tqdm import tqdm
+from bank_architect import toggle_bank_architect
 
 CONFIG_FILE = "areas_config.json"
 ANCHORS_DIR = os.path.join("images", "anchors")
@@ -58,11 +59,14 @@ SPELL_TEMPLATES = {
     "ice_barrage": "images/ice_barrage.png",
 }
 
-# Special Attack minimap orb templates (unactive vs active state)
+# Special Attack minimap orb templates (unactive cyan, active glowing, no-spec-weapon grey)
 SPEC_ORB_TEMPLATES = {
     "unactive": "images/spec_orb_unactive.png",
     "active": "images/spec_orb_active.png",
+    "no_spec": "images/spec_orb_nospecweapon.png",
 }
+_spec_orb_calibrated = False
+_last_spec_equip_time = None
 
 GMAUL_TEMPLATE_PATH = "images/granite_maul.png"
 
@@ -365,10 +369,12 @@ def auto_trim_crop(crop_bgr, margin=1):
 
 def _calibrate_spec_orb_from_screen(screen_gray, origin_x, origin_y, screen_w, screen_h):
     """
-    Scan the minimap region above the side panel for spec_orb_unactive.png or spec_orb_active.png.
+    Scan the minimap region above the side panel for spec_orb_unactive.png, spec_orb_active.png,
+    or spec_orb_nospecweapon.png.
     Since the spec orb is attached to the top-right minimap (not the bottom-right side panel),
     scanning the vertical column above the side panel finds its exact position at any window height.
     """
+    global _spec_orb_calibrated
     sx1 = max(0, int(round(origin_x - 160 * ui_scale)))
     sx2 = min(screen_w, int(round(origin_x + 300 * ui_scale)))
     sy1 = 0
@@ -414,6 +420,7 @@ def _calibrate_spec_orb_from_screen(screen_gray, origin_x, origin_y, screen_w, s
         min(screen_w - 1, abs_x2 + pad),
         min(screen_h - 1, abs_y2 + pad),
     )
+    _spec_orb_calibrated = True
     print(f"  -> Calibrated minimap 'spec' orb ({state_key}) click={clicking_areas['spec']} search={searching_areas['spec']} (conf={oval:.3f})")
     return True
 
@@ -782,8 +789,9 @@ def is_slot_tagged_color(slot_bgr, style):
     Detect if an inventory slot is tagged with RuneLite Inventory Tags for:
       - 'mage'  (Pure Blue #0000FF or Pure Cyan #00FFFF)
       - 'range' (Pure Green #00FF00)
-      - 'melee' (Pure Red #FF0000)
-      - 'spec'  (Pure Magenta / Pink #FF00FF)
+      - 'melee'        (Pure Red #FF0000 — melee armor)
+      - 'melee_weapon' (Pure Yellow #FFFF00 — melee mainhand weapons & offhand defenders; skipped on Numpad 0)
+      - 'spec'         (Pure Magenta / Pink #FF00FF — special attack weapons)
 
     Why this never false-positives on untagged items (like Blighted Ice/Veng Sacks or potions):
     1. Every untagged OSRS item sprite is enclosed by a 1px pure-black silhouette border
@@ -792,10 +800,18 @@ def is_slot_tagged_color(slot_bgr, style):
        So we check ONLY the outer silhouette border pixels adjacent to the inventory background,
        and reject any slot whose exterior silhouette border is still predominantly black.
     2. We require strict channel separation (suppressing Green for pure Blue so slate-blue
-       Ice Sacks with G ~ 90-140 are ignored).
+       Ice Sacks with G ~ 90-140 are ignored), and for Yellow ('melee_weapon') we exclude the
+       top stack-quantity band so yellow stack digits (e.g. '5000' bolts) never match.
     """
     if slot_bgr is None or slot_bgr.size == 0:
         return False
+
+    if style == "melee_weapon":
+        # Exclude the top ~14px band where OSRS renders yellow (#FFFF00) stack counts (e.g. '5000' bolts)
+        top_skip = min(slot_bgr.shape[0] // 2, max(11, int(round(14 * ui_scale))))
+        slot_bgr = slot_bgr[top_skip:, :]
+        if slot_bgr.size == 0:
+            return False
 
     b = slot_bgr[:, :, 0].astype(np.int16)
     g = slot_bgr[:, :, 1].astype(np.int16)
@@ -808,8 +824,10 @@ def is_slot_tagged_color(slot_bgr, style):
     near_bg = cv2.dilate(bg_mask.astype(np.uint8), kernel, iterations=1) > 0
     exterior_border = near_bg & (~bg_mask)
 
-    # Untagged items have a pure-black (R<=18, G<=18, B<=18) outer border touching the background
-    black_border_pixels = int(np.count_nonzero(exterior_border & (r <= 18) & (g <= 18) & (b <= 18)))
+    # Untagged items have a dark/black silhouette border (R<=38, G<=38, B<=38) where the item meets the background.
+    # (Using <=38 instead of <=18 catches anti-aliased/xBR/bicubic-scaled black outlines such as on Teleport to House tablets,
+    # whose outer outline blends with the brown stone to ~BGR 24..36 while its interior has a blue rune circle.)
+    black_border_pixels = int(np.count_nonzero(exterior_border & (r <= 38) & (g <= 38) & (b <= 38)))
 
     if style == "mage":
         # Pure Blue (#0000FF): high B, BOTH R and G suppressed (excludes slate-blue Ice Sack where G ~ 90-140)
@@ -827,6 +845,18 @@ def is_slot_tagged_color(slot_bgr, style):
         # Pure Red (#FF0000): high R, both G and B suppressed
         tag_mask = (r >= 195) & (g <= 45) & (b <= 45) & ((r - g) >= 150) & ((r - b) >= 150)
         fill_border = (r >= 115) & (g <= 45) & (b <= 45) & ((r - g) >= 75) & ((r - b) >= 75)
+    elif style == "melee_weapon":
+        # Pure Yellow (#FFFF00): both R and G high, B suppressed, R and G balanced
+        tag_mask = (
+            (r >= 195) & (g >= 195) & (b <= 45)
+            & ((r - b) >= 150) & ((g - b) >= 150)
+            & (np.abs(r - g) <= 45)
+        )
+        fill_border = (
+            (r >= 115) & (g >= 115) & (b <= 45)
+            & ((r - b) >= 75) & ((g - b) >= 75)
+            & (np.abs(r - g) <= 40)
+        )
     elif style == "spec":
         # Pure Magenta / Pink (#FF00FF): both R and B high, G suppressed, R and B balanced
         tag_mask = (
@@ -846,12 +876,27 @@ def is_slot_tagged_color(slot_bgr, style):
     border_tag_pixels = int(np.count_nonzero(exterior_border & (tag_mask | fill_border)))
     total_tag_pixels = int(np.count_nonzero(tag_mask))
 
-    min_border_pixels = max(8, int(round(12 * ui_scale)))
-    # A tagged item's outer silhouette has colored border pixels exceeding any stray black border pixels
+    min_border_pixels = (
+        max(6, int(round(9 * ui_scale)))
+        if style == "melee_weapon"
+        else max(8, int(round(12 * ui_scale)))
+    )
+    # A tagged item's outer silhouette has colored border pixels exceeding any stray dark border pixels
     if border_tag_pixels >= min_border_pixels and border_tag_pixels > black_border_pixels:
         return True
-    # Fallback if item fills almost the entire slot: require strong pure neon tag count and no black border
-    if total_tag_pixels >= max(16, int(round(24 * (ui_scale ** 2)))) and black_border_pixels < min_border_pixels:
+    # Fallback if item fills almost the entire slot: require strong pure neon tag count, at least some tag on the
+    # exterior border (so interior-only blue icons like Teleport to House tablets with border_tag_pixels == 0 never match),
+    # and no dark silhouette border
+    min_total_pixels = (
+        max(12, int(round(18 * (ui_scale ** 2))))
+        if style == "melee_weapon"
+        else max(16, int(round(24 * (ui_scale ** 2))))
+    )
+    if (
+        total_tag_pixels >= min_total_pixels
+        and border_tag_pixels >= max(4, min_border_pixels // 2)
+        and black_border_pixels < min_border_pixels
+    ):
         return True
     return False
 
@@ -860,11 +905,16 @@ def is_slot_tagged_color(slot_bgr, style):
 def equip_tagged_gear(style, append_first_spec=False):
     """
     Take a SINGLE screenshot of the 28-slot inventory grid, find all slots tagged with
-    the requested style ('mage' = blue/cyan, 'range' = green, 'melee' = red), and click them rapidly.
+    the requested style(s) ('mage' = blue/cyan, 'range' = green, 'melee' = red armor,
+    'melee_weapon' = yellow weapon/defender), and click them rapidly.
     If append_first_spec=True, also scans top->bottom, left->right for the 1st 'spec' (Magenta #FF00FF)
-    tagged item and clicks it LAST.
+    tagged item, clicks it LAST, and records `_last_spec_equip_time` at that exact click.
     Also uses the captured inventory screenshot in the background to refresh the combo-eat slot cache.
     """
+    global _last_spec_equip_time
+    _last_spec_equip_time = None
+    styles = (style,) if isinstance(style, str) else tuple(style)
+
     slots = get_inventory_slot_boxes(zigzag=True, detect_hw_base=27, detect_hh_base=25)
     inv_pad = max(14, int(round(18 * ui_scale)))
     ux1 = max(0, min(s[2][0] for s in slots) - inv_pad)
@@ -885,8 +935,8 @@ def equip_tagged_gear(style, append_first_spec=False):
     matched_slots = []
     for row, col, (dx1, dy1, dx2, dy2), click_box in get_inventory_slot_boxes(zigzag=True):
         slot_bgr = inv_bgr[dy1 - uy1:dy2 - uy1, dx1 - ux1:dx2 - ux1]
-        if is_slot_tagged_color(slot_bgr, style):
-            matched_slots.append((row, col, click_box))
+        if any(is_slot_tagged_color(slot_bgr, st) for st in styles):
+            matched_slots.append((row, col, click_box, False))
 
     first_spec_slot = None
     if append_first_spec:
@@ -894,18 +944,21 @@ def equip_tagged_gear(style, append_first_spec=False):
         for row, col, (dx1, dy1, dx2, dy2), click_box in get_inventory_slot_boxes(zigzag=False):
             slot_bgr = inv_bgr[dy1 - uy1:dy2 - uy1, dx1 - ux1:dx2 - ux1]
             if is_slot_tagged_color(slot_bgr, "spec"):
-                first_spec_slot = (row, col, click_box)
+                first_spec_slot = (row, col, click_box, True)
                 break
         if first_spec_slot is not None:
             matched_slots.append(first_spec_slot)
 
-    for idx, (row, col, click_box) in enumerate(matched_slots):
+    for idx, (row, col, click_box, is_spec_item) in enumerate(matched_slots):
         if idx > 0:
             time.sleep(random.uniform(0.012, 0.022))
         fast_click_spot(click_box)
+        if is_spec_item:
+            _last_spec_equip_time = time.time()
 
+    style_label = "+".join(styles)
     spec_info = f" + spec at {(first_spec_slot[0], first_spec_slot[1])}" if first_spec_slot else ""
-    print(f"[Gear] Switched '{style}' gear{spec_info} ({len(matched_slots)} items clicked: {[(r, c) for r, c, _ in matched_slots]}).")
+    print(f"[Gear] Switched '{style_label}' gear{spec_info} ({len(matched_slots)} items clicked: {[(r, c) for r, c, _, _ in matched_slots]}).")
     return len(matched_slots)
 
 
@@ -936,20 +989,23 @@ def select_spell(spell_key="ice_barrage"):
         find_and_click_image(SPELL_TEMPLATES[spell_key], searching_areas.get("magic_panel", searching_areas["inventory"]), fast=True)
 
 
-@timing_decorator
-def activate_spec_orb():
+def _inspect_spec_orb_state(allow_rescan=False):
     """
-    Check the Special Attack orb next to the minimap and click it ONLY if it is not yet activated.
-    Compares 3-channel BGR template correlation against spec_orb_unactive.png vs spec_orb_active.png
-    so the vivid cyan-blue unactive orb is cleanly distinguished from the glowing active orb.
+    Capture the minimap Special Attack orb patch and classify its visual state:
+      - 'active'  : Spec is already queued/glowing (spec_orb_active.png)
+      - 'cyan'    : Weapon has a Special Attack bar and spec is unactive (cyan orb fill, 25%..100% energy)
+      - 'no_spec' : Equipped weapon has NO Special Attack bar (grey/non-cyan orb, spec_orb_nospecweapon.png)
+    Returns (state, click_box, debug_scores).
     """
     unactive_tmpl = get_cached_template(SPEC_ORB_TEMPLATES["unactive"], color=True)
     active_tmpl = get_cached_template(SPEC_ORB_TEMPLATES["active"], color=True)
+    nospec_tmpl = get_cached_template(SPEC_ORB_TEMPLATES["no_spec"], color=True)
     if unactive_tmpl is None:
-        fast_click_spot(clicking_areas["spec"])
-        return True
+        return "cyan", clicking_areas["spec"], {}
 
     th, tw = unactive_tmpl.shape[:2]
+    max_tw = max([tw] + [t.shape[1] for t in (active_tmpl, nospec_tmpl) if t is not None])
+    max_th = max([th] + [t.shape[0] for t in (active_tmpl, nospec_tmpl) if t is not None])
     pad = max(4, int(round(6 * ui_scale)))
     sbox = searching_areas.get("spec")
     if not (isinstance(sbox, tuple) and len(sbox) == 4):
@@ -957,22 +1013,36 @@ def activate_spec_orb():
         sbox = (max(0, bx1 - pad), max(0, by1 - pad), bx2 + pad, by2 + pad)
 
     sx1, sy1, sx2, sy2 = sbox
-    sx2 = max(sx2, sx1 + tw + 4)
-    sy2 = max(sy2, sy1 + th + 4)
+    sx2 = max(sx2, sx1 + max_tw + 4)
+    sy2 = max(sy2, sy1 + max_th + 4)
 
     shot = pyautogui.screenshot(region=(sx1, sy1, sx2 - sx1, sy2 - sy1))
     patch_bgr = cv2.cvtColor(np.array(shot), cv2.COLOR_RGB2BGR)
 
-    res_unactive = cv2.matchTemplate(patch_bgr, unactive_tmpl, cv2.TM_CCOEFF_NORMED)
-    _, unactive_val, _, unactive_loc = cv2.minMaxLoc(res_unactive)
+    def _score_patch(p_bgr, px1, py1):
+        u_val, u_loc = -1.0, (0, 0)
+        if p_bgr.shape[0] >= th and p_bgr.shape[1] >= tw:
+            _, u_val, _, u_loc = cv2.minMaxLoc(cv2.matchTemplate(p_bgr, unactive_tmpl, cv2.TM_CCOEFF_NORMED))
+        a_val, a_loc = -1.0, (0, 0)
+        if active_tmpl is not None and p_bgr.shape[0] >= active_tmpl.shape[0] and p_bgr.shape[1] >= active_tmpl.shape[1]:
+            _, a_val, _, a_loc = cv2.minMaxLoc(cv2.matchTemplate(p_bgr, active_tmpl, cv2.TM_CCOEFF_NORMED))
+        n_val, n_loc = -1.0, (0, 0)
+        if nospec_tmpl is not None and p_bgr.shape[0] >= nospec_tmpl.shape[0] and p_bgr.shape[1] >= nospec_tmpl.shape[1]:
+            _, n_val, _, n_loc = cv2.minMaxLoc(cv2.matchTemplate(p_bgr, nospec_tmpl, cv2.TM_CCOEFF_NORMED))
 
-    active_val = -1.0
-    if active_tmpl is not None and patch_bgr.shape[0] >= active_tmpl.shape[0] and patch_bgr.shape[1] >= active_tmpl.shape[1]:
-        res_active = cv2.matchTemplate(patch_bgr, active_tmpl, cv2.TM_CCOEFF_NORMED)
-        _, active_val, _, _ = cv2.minMaxLoc(res_active)
+        b = p_bgr[:, :, 0].astype(np.int16)
+        g = p_bgr[:, :, 1].astype(np.int16)
+        r = p_bgr[:, :, 2].astype(np.int16)
+        # Vivid cyan orb fill (present at 25%..100% spec energy when holding a spec-capable weapon)
+        strong_cyan_px = int(np.count_nonzero((b >= 115) & (g >= 95) & (r <= 42) & ((b - r) >= 80) & ((g - r) >= 60)))
+        # Cyan/teal tint (present in both unactive cyan orb and active cyan-glow ring, absent in grey no_spec orb)
+        any_cyan_px = int(np.count_nonzero((b - r) >= 25))
+        return u_val, u_loc, a_val, a_loc, n_val, n_loc, strong_cyan_px, any_cyan_px
 
-    # If neither template matched strongly in searching_areas["spec"], rescan the minimap column once
-    if max(unactive_val, active_val) < 0.72:
+    u_val, u_loc, a_val, a_loc, n_val, n_loc, strong_cyan_px, any_cyan_px = _score_patch(patch_bgr, sx1, sy1)
+
+    # One-time fallback calibration only if spec orb was never calibrated yet and no template matched
+    if allow_rescan and not _spec_orb_calibrated and max(u_val, a_val, n_val) < 0.72:
         full_shot = pyautogui.screenshot()
         full_bgr = cv2.cvtColor(np.array(full_shot), cv2.COLOR_RGB2BGR)
         full_gray = cv2.cvtColor(full_bgr, cv2.COLOR_BGR2GRAY)
@@ -983,35 +1053,126 @@ def activate_spec_orb():
             sx2 = max(sx2, sx1 + tw + 4)
             sy2 = max(sy2, sy1 + th + 4)
             patch_bgr = full_bgr[sy1:sy2, sx1:sx2]
-            if patch_bgr.shape[0] >= th and patch_bgr.shape[1] >= tw:
-                _, unactive_val, _, unactive_loc = cv2.minMaxLoc(
-                    cv2.matchTemplate(patch_bgr, unactive_tmpl, cv2.TM_CCOEFF_NORMED)
-                )
-                if active_tmpl is not None and patch_bgr.shape[0] >= active_tmpl.shape[0] and patch_bgr.shape[1] >= active_tmpl.shape[1]:
-                    _, active_val, _, _ = cv2.minMaxLoc(
-                        cv2.matchTemplate(patch_bgr, active_tmpl, cv2.TM_CCOEFF_NORMED)
-                    )
+            u_val, u_loc, a_val, a_loc, n_val, n_loc, strong_cyan_px, any_cyan_px = _score_patch(patch_bgr, sx1, sy1)
 
-    if active_val >= unactive_val and active_val >= 0.75:
-        print(f"[Spec] Spec orb already active (active={active_val:.3f} >= unactive={unactive_val:.3f}) — skipping.")
+    inset_x = max(2, int(round(4 * ui_scale)))
+    inset_y = max(2, int(round(4 * ui_scale)))
+
+    def _box_from_loc(loc, bw, bh):
+        return (
+            sx1 + loc[0] + inset_x,
+            sy1 + loc[1] + inset_y,
+            max(sx1 + loc[0] + inset_x + 2, sx1 + loc[0] + bw - inset_x),
+            max(sy1 + loc[1] + inset_y + 2, sy1 + loc[1] + bh - inset_y),
+        )
+
+    min_cyan = max(12, int(round(18 * (ui_scale ** 2))))
+    scores = {
+        "unactive": u_val,
+        "active": a_val,
+        "no_spec": n_val,
+        "strong_cyan_px": strong_cyan_px,
+        "any_cyan_px": any_cyan_px,
+    }
+
+    # 1. Non-cyan / grey orb (equipped weapon has NO Special Attack bar)
+    if (n_val >= 0.72 and n_val >= max(u_val, a_val) and strong_cyan_px < min_cyan) or (
+        any_cyan_px < min_cyan and u_val < 0.72
+    ):
+        if n_val >= 0.72 and nospec_tmpl is not None:
+            nh, nw = nospec_tmpl.shape[:2]
+            clicking_areas["spec"] = _box_from_loc(n_loc, nw, nh)
+        return "no_spec", clicking_areas["spec"], scores
+
+    # 2. Active glowing spec orb (spec already queued — do NOT click again)
+    if a_val >= u_val and a_val >= 0.75 and any_cyan_px >= min_cyan:
+        return "active", clicking_areas["spec"], scores
+
+    # 3. Cyan unactive spec orb (25%..100% energy, ready to click immediately with zero delay)
+    if u_val >= 0.72:
+        clicking_areas["spec"] = _box_from_loc(u_loc, tw, th)
+        return "cyan", clicking_areas["spec"], scores
+    if strong_cyan_px >= min_cyan:
+        return "cyan", clicking_areas["spec"], scores
+
+    return "no_spec", clicking_areas["spec"], scores
+
+
+@timing_decorator
+def activate_spec_orb(spec_equip_time=None, restore_pos=None):
+    """
+    Check the Special Attack orb next to the minimap and click it ONLY if it is not yet activated:
+      - If the orb is already 'active' (glowing): skip clicking and restore cursor immediately.
+      - If the orb is 'cyan' (previous weapon already had a Special Attack bar, or tick already arrived):
+        click the Spec Orb immediately with ZERO delay and restore cursor.
+      - If the orb is 'no_spec' (another color other than cyan — previous weapon had NO Special Attack bar):
+        restore cursor immediately so the user can aim freely, wait until the orb turns cyan (or ~0.6s
+        has elapsed since `spec_equip_time`), then click the Spec Orb last and restore the live cursor.
+    """
+    global _combo_dwell_pause_until
+    state, cbox, scores = _inspect_spec_orb_state(allow_rescan=True)
+
+    if state == "active":
+        if restore_pos is not None:
+            pyautogui.moveTo(restore_pos[0], restore_pos[1], _pause=False)
+        print(
+            f"[Spec] Spec orb already active (active={scores.get('active', -1):.3f}, "
+            f"unactive={scores.get('unactive', -1):.3f}) — skipping."
+        )
         return False
 
-    if unactive_val >= 0.72:
-        inset_x = max(2, int(round(4 * ui_scale)))
-        inset_y = max(2, int(round(4 * ui_scale)))
-        matched_click_box = (
-            sx1 + unactive_loc[0] + inset_x,
-            sy1 + unactive_loc[1] + inset_y,
-            sx1 + unactive_loc[0] + tw - inset_x,
-            sy1 + unactive_loc[1] + th - inset_y,
+    if state == "cyan":
+        fast_click_spot(cbox)
+        if restore_pos is not None:
+            pyautogui.moveTo(restore_pos[0], restore_pos[1], _pause=False)
+        print(
+            f"[Spec] Activated cyan spec orb immediately (unactive={scores.get('unactive', -1):.3f}, "
+            f"cyan_px={scores.get('strong_cyan_px', 0)})."
         )
-        clicking_areas["spec"] = matched_click_box
-        fast_click_spot(matched_click_box)
-        print(f"[Spec] Activated spec orb (unactive={unactive_val:.3f}, active={active_val:.3f}).")
         return True
 
-    print(f"[Spec] Spec orb state uncertain (unactive={unactive_val:.3f}, active={active_val:.3f}) — clicking calibrated spec spot.")
-    fast_click_spot(clicking_areas["spec"])
+    # Orb is NOT cyan (previous weapon had no Special Attack bar):
+    # Restore cursor right away so user can aim at opponent while waiting for the 0.6s game tick
+    if restore_pos is not None:
+        pyautogui.moveTo(restore_pos[0], restore_pos[1], _pause=False)
+
+    if spec_equip_time is None:
+        # Called standalone (e.g. F9 Gmaul combo or spec weapon was already held)
+        fast_click_spot(cbox)
+        if restore_pos is not None:
+            cur_x, cur_y = pyautogui.position()
+            pyautogui.moveTo(cur_x, cur_y, _pause=False)
+        return True
+
+    # Poll every 20ms until the orb turns cyan on the next server tick (or 0.6s + ping grace has passed)
+    min_deadline = spec_equip_time + 0.60
+    max_deadline = spec_equip_time + 0.75
+    _combo_dwell_pause_until = max(_combo_dwell_pause_until, max_deadline + 0.15)
+
+    while True:
+        now = time.time()
+        if now >= max_deadline:
+            break
+        time.sleep(0.020)
+        state, cbox, scores = _inspect_spec_orb_state(allow_rescan=False)
+        if state in ("cyan", "active"):
+            break
+        if time.time() >= min_deadline and scores.get("no_spec", -1.0) < 0.72:
+            # Past 0.6s and no longer matching the grey no-spec orb (e.g. low spec energy)
+            break
+
+    if state == "active":
+        print("[Spec] Spec orb became active during tick wait — skipping click.")
+        return False
+
+    cur_x, cur_y = pyautogui.position()
+    fast_click_spot(cbox)
+    pyautogui.moveTo(cur_x, cur_y, _pause=False)
+    waited = time.time() - spec_equip_time
+    print(
+        f"[Spec] Previous weapon had no spec bar — clicked spec orb last after {waited:.3f}s "
+        f"(state={state}, unactive={scores.get('unactive', -1):.3f}, no_spec={scores.get('no_spec', -1):.3f})."
+    )
     return True
 
 
@@ -1089,16 +1250,16 @@ def on_numpad2_press(e):
 
 @timing_decorator
 def execute_melee_switch():
-    """Swap to Melee gear (Red tag), activate Piety, return to Inventory tab, and restore cursor."""
+    """Swap to Melee armor (Red tag) + Melee weapon/defender (Yellow tag), activate Piety, return to Inventory tab, and restore cursor."""
     global _combo_dwell_pause_until, current_equipped_style
     _combo_dwell_pause_until = time.time() + 0.35
     current_equipped_style = "melee"
     orig_x, orig_y = pyautogui.position()
 
-    # 1. Open Inventory and equip Melee gear
+    # 1. Open Inventory and equip both Red ('melee') armor and Yellow ('melee_weapon') weapon/defender
     fast_click_spot(clicking_areas["inventory_tag"])
     time.sleep(random.uniform(0.055, 0.07))
-    equip_tagged_gear("melee")
+    equip_tagged_gear(("melee", "melee_weapon"))
 
     # 2. Open Prayer tab and activate Piety (if not already active)
     fast_click_spot(clicking_areas["prayer_tag"])
@@ -1111,7 +1272,7 @@ def execute_melee_switch():
 
 
 def on_numpad3_press(e):
-    """Numpad 3: Swap to Melee gear, activate Piety, return to Inventory tab, and restore cursor."""
+    """Numpad 3: Swap to Melee gear (Red armor + Yellow weapon/defender), activate Piety, return to Inventory tab, and restore cursor."""
     if e.event_type == keyboard.KEY_DOWN:
         execute_melee_switch()
 
@@ -1120,9 +1281,10 @@ def on_numpad3_press(e):
 # @throttle
 def on_numpad0_press(e):
     """
-    Numpad 0: Swap to Melee gear (Red tag) + 1st Spec weapon (Magenta #FF00FF tag) last,
-    activate Piety, return to Inventory tab, click Spec Orb last (if not already active),
-    and restore cursor to its original position.
+    Numpad 0: Swap to Melee armor (Red #FF0000 tag, skipping Yellow #FFFF00 melee weapons) + 1st Spec weapon
+    (Magenta #FF00FF tag) last, activate Piety, return to Inventory tab, and click Spec Orb last:
+      - Immediately with zero delay if Spec Orb is already cyan (previous weapon had a Special Attack bar).
+      - After ~0.6s / once Spec Orb turns cyan if previous weapon had NO Special Attack bar.
     """
     global _combo_dwell_pause_until, current_equipped_style
     if e.event_type == keyboard.KEY_DOWN:
@@ -1130,20 +1292,20 @@ def on_numpad0_press(e):
         current_equipped_style = "melee"
         orig_x, orig_y = pyautogui.position()
 
-        # 1. Open Inventory, equip all Red melee gear, then click the 1st Magenta spec weapon (top->bottom, left->right) last
+        # 1. Open Inventory, equip ONLY Red melee armor (skipping Yellow melee weapons), then click 1st Magenta spec weapon last
         fast_click_spot(clicking_areas["inventory_tag"])
         time.sleep(random.uniform(0.055, 0.07))
         equip_tagged_gear("melee", append_first_spec=True)
+        spec_equip_time = _last_spec_equip_time
 
         # 2. Open Prayer tab and activate Piety (if not already active)
         fast_click_spot(clicking_areas["prayer_tag"])
         time.sleep(random.uniform(0.065, 0.08))
         activate_prayers("piety")
 
-        # 3. Return to Inventory tab, activate Spec Orb last (if not already active), and restore cursor
+        # 3. Return to Inventory tab, then click Spec Orb immediately (if cyan) or after 0.6s tick (if non-cyan)
         fast_click_spot(clicking_areas["inventory_tag"])
-        activate_spec_orb()
-        pyautogui.moveTo(orig_x, orig_y, _pause=False)
+        activate_spec_orb(spec_equip_time=spec_equip_time, restore_pos=(orig_x, orig_y))
 
 
 def is_prayer_active_glow(patch_bgr):
@@ -1574,9 +1736,9 @@ def update_combo_eat_cache_from_bgr(inv_bgr, ux1, uy1, inventory_open=False, cur
                     sx2 = min(iw, dx2 - ux1)
                     s_bgr = inv_bgr[sy1:sy2, sx1:sx2]
                     tag_found = None
-                    for st in ("mage", "range", "melee", "spec"):
+                    for st in ("mage", "range", "melee", "melee_weapon", "spec"):
                         if is_slot_tagged_color(s_bgr, st):
-                            tag_found = st
+                            tag_found = "mel_wpn" if st == "melee_weapon" else st
                             break
                     if tag_found is not None:
                         cell = f"[tag:{tag_found}]"
@@ -2452,7 +2614,7 @@ def bind_numpad_key(numpad_name, callback):
     )
 
 
-# Set up the listeners for Numpad 0-6, F7-F12, `, and Esc keys immediately (zero startup delay)
+# Set up the listeners for Numpad 0-6, F6-F12, `, and Esc keys immediately (zero startup delay)
 bind_numpad_key("numpad 0", on_numpad0_press)
 bind_numpad_key("numpad 1", on_numpad1_press)
 bind_numpad_key("numpad 2", on_numpad2_press)
@@ -2460,6 +2622,7 @@ bind_numpad_key("numpad 3", on_numpad3_press)
 bind_numpad_key("numpad 4", on_numpad4_press)
 bind_numpad_key("numpad 5", on_numpad5_press)
 bind_numpad_key("numpad 6", on_numpad6_press)
+keyboard.on_press_key("f6", toggle_bank_architect)
 keyboard.on_press_key("f7", toggle_inventory_debug)
 keyboard.on_press_key("f8", on_f8_press)
 keyboard.on_press_key("f9", on_f9_press)
@@ -2470,7 +2633,7 @@ keyboard.on_press_key("`", toggle_auto_overhead_watcher)
 keyboard.on_press_key("esc", on_esc_press)
 print(
     "Listening for Numpad 0 (Melee+Spec), Numpad 1-3 (Mage/Range/Melee), Numpad 4-6 (Prot Mage/Range/Melee), "
-    "F7 (Inv Debug), F8 (Combo Eat), F9 (AGS->Gmaul), ` (Auto-Style Switch), Esc, "
+    "F6 (Bank Architect Auto-Sort), F7 (Inv Debug), F8 (Combo Eat), F9 (AGS->Gmaul), ` (Auto-Style Switch), Esc, "
     "F10 (refresh), F11 (PKer alarm), and F12 (Ice/Blood Barrage). Press Ctrl+C to exit."
 )
 
